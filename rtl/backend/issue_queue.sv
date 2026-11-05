@@ -31,9 +31,10 @@ module issue_queue (
   logic [5:0] destination_q [16];
   logic [63:0] payload_q [16];
   logic [1:0] awake [16];
-  logic [15:0] chosen [2], candidate [2], taken;
+  logic [15:0] chosen [2], candidate [2], older [16];
+  logic [15:0] first0, first1, second1, select1;
   logic [15:0][4:0] age;
-  logic [4:0] pick [2];
+  logic launch0;
   logic [3:0] free_slot [2];
   logic found_free;
   wire stop = rst_i || flush_i || recover_i;
@@ -71,28 +72,22 @@ module issue_queue (
     end
   end
 
-  // oldest live slot as {found, slot}: a 4-level tree; equal ages keep the lower slot.
-  function automatic logic [4:0] oldest(input logic [15:0] live, input logic [15:0][4:0] slot_age);
-    logic [15:0] node_live;
-    logic [15:0][3:0] node_slot;
-    logic [15:0][4:0] node_age;
-    logic right;
-    node_live = live;
-    node_age = slot_age;
-    for (int slot = 0; slot < 16; slot++) node_slot[slot] = 4'(slot);
+  function automatic logic exactly_one(input logic [15:0] mask);
+    logic [15:0] any_node, multiple_node;
+    any_node = mask;
+    multiple_node = 0;
     for (int width = 8; width >= 1; width = width / 2)
       for (int node = 0; node < width; node++) begin
-        right = node_live[2*node+1] && (!node_live[2*node] || node_age[2*node+1] < node_age[2*node]);
-        node_live[node] = node_live[2*node] || node_live[2*node+1];
-        node_slot[node] = right ? node_slot[2*node+1] : node_slot[2*node];
-        node_age[node] = right ? node_age[2*node+1] : node_age[2*node];
+        multiple_node[node] = multiple_node[2*node] || multiple_node[2*node+1]
+            || (any_node[2*node] && any_node[2*node+1]);
+        any_node[node] = any_node[2*node] || any_node[2*node+1];
       end
-    return {node_live[0], node_slot[0]};
+    return any_node[0] && !multiple_node[0];
   endfunction
 
   // oldest-ready issue selection
   // port zero selects first; rob-relative age is independent of iq storage order.
-  // port_ready_i gates only the tree result, so late backpressure does not cross the age compare.
+  // Age ordering precedes wakeup; both ports rank ready candidates in parallel.
   always_comb begin
     issue_o = 0;
     issue_id_o = 0;
@@ -104,17 +99,27 @@ module issue_queue (
       for (int port_id = 0; port_id < 2; port_id++)
         candidate[port_id][slot] = valid_q[slot] && (&awake[slot]) && eligible_q[slot][port_id];
     end
-    taken = 0;
+    for (int slot = 0; slot < 16; slot++) older[slot] = 0;
+    for (int slot = 0; slot < 16; slot++)
+      for (int other = 0; other < slot; other++) begin
+        older[slot][other] = age[other] <= age[slot];
+        older[other][slot] = !older[slot][other];
+      end
+    for (int slot = 0; slot < 16; slot++) begin
+      first0[slot] = candidate[0][slot] && !(|(candidate[0] & older[slot]));
+      first1[slot] = candidate[1][slot] && !(|(candidate[1] & older[slot]));
+      second1[slot] = candidate[1][slot] && exactly_one(candidate[1] & older[slot]);
+    end
+    launch0 = !stop && port_ready_i[0] && (|first0);
+    select1 = launch0 && (|(first0 & first1)) ? second1 : first1;
     for (int port_id = 0; port_id < 2; port_id++) begin
-      pick[port_id] = oldest(candidate[port_id] & ~taken, age);
-      issue_o[port_id] = !stop && port_ready_i[port_id] && pick[port_id][4];
-      chosen[port_id] = issue_o[port_id] ? 16'b1 << pick[port_id][3:0] : 16'd0;
-      taken = taken | chosen[port_id];
-      if (issue_o[port_id]) begin
-        issue_id_o[port_id*13 +: 13] = id_q[pick[port_id][3:0]];
-        read_address_o[port_id*12 +: 12] = source_q[pick[port_id][3:0]];
-        issue_destination_o[port_id*6 +: 6] = destination_q[pick[port_id][3:0]];
-        issue_payload_o[port_id*64 +: 64] = payload_q[pick[port_id][3:0]];
+      chosen[port_id] = !stop && port_ready_i[port_id] ? (port_id == 0 ? first0 : select1) : 16'd0;
+      issue_o[port_id] = |chosen[port_id];
+      for (int slot = 0; slot < 16; slot++) begin
+        issue_id_o[port_id*13 +: 13] |= {13{chosen[port_id][slot]}} & id_q[slot];
+        read_address_o[port_id*12 +: 12] |= {12{chosen[port_id][slot]}} & source_q[slot];
+        issue_destination_o[port_id*6 +: 6] |= {6{chosen[port_id][slot]}} & destination_q[slot];
+        issue_payload_o[port_id*64 +: 64] |= {64{chosen[port_id][slot]}} & payload_q[slot];
       end
     end
   end

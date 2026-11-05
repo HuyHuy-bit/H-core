@@ -50,6 +50,9 @@ constexpr unsigned SLOT_WORDS=(EVENT_BITS+31)/32;
 #define BACKEND(name) CORE(backend__DOT__##name)
 #define ROB(name) BACKEND(backend__DOT__backend__DOT__rob__DOT__##name)
 #define MEMORY(name) BACKEND(systems__DOT__memory_service__DOT__##name)
+#ifdef TB_ATTRIBUTION
+#include "perf_attribution_sample.hpp"
+#endif
 static const char* kind(uint32_t word) {
     const unsigned rd=(word>>7)&31, rs1=(word>>15)&31;
     switch (word&127) {
@@ -136,6 +139,14 @@ int main(int argc,char** argv) {
             for (int n=5;n<argc;++n) if (std::string(argv[n]).rfind("+"+name+"=",0)==0) return argv[n]+name.size()+2;
             return "";
         };
+        const bool attribution=plusarg("attribution")=="1";
+        require(plusarg("attribution").empty() || attribution,"invalid attribution option");
+        require(!attribution || perf,"attribution requires perf mode");
+#ifndef TB_ATTRIBUTION
+        require(!attribution,"attribution not enabled in this build");
+#else
+        perf_attribution::Observer attribution_observer;
+#endif
         unsigned read_latency=1, write_latency=1, terminal=0, warm[4]={};
         bool warm_window=false;
         if (perf) {
@@ -350,6 +361,10 @@ int main(int argc,char** argv) {
                 sample(dut,memory,counters[0]);
                 // The region holds edges warm_at[0][0] .. warm_at[1][0]-1, the same edges as warm_cycles.
                 if (warm_at[0][0] && cycle>=warm_at[0][0] && (!warm_at[1][0] || cycle<warm_at[1][0])) sample(dut,memory,counters[1]);
+#ifdef TB_ATTRIBUTION
+                if (attribution) attribution_observer.sample(attribution_frame(dut,cycle,
+                    warm_at[0][0] && cycle>=warm_at[0][0] && (!warm_at[1][0] || cycle<warm_at[1][0])));
+#endif
                 retired+=accepted; ++bins[accepted];
                 if (terminal_seen) terminal_cycle=cycle+1;
                 for (unsigned n=0;n<2;++n) if (warm_at[n][0]==cycle+1 && !warm_at[n][1]) {
@@ -382,6 +397,9 @@ int main(int argc,char** argv) {
                     std::cout<<'\n';
                     for (unsigned n=0;n<1u+warm_window;++n)
                         for (const auto& [name,value]:counters[n]) std::cout<<"COUNTER "<<(n ? "region ":"all ")<<name<<' '<<value<<'\n';
+#ifdef TB_ATTRIBUTION
+                    if (attribution) attribution_observer.print(std::cout,warm_window);
+#endif
                 }
                 std::cout<<(act4 ? "ACT4 PASS events=":"CORE PASS events=")<<events<<" cycles="<<cycle+1<<" dual="<<dual<<" recycles="<<recycles
                          <<(act4 ? std::string():" mmio_reads="+std::to_string(mmio_read_count))<<'\n';

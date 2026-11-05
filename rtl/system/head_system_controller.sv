@@ -116,17 +116,14 @@ module head_system_controller #(parameter bit CLEAN = 0) (
   // retirement and trap events
   // an illegal csr first completes as a raw fault; the next head request enters the trap.
   always_comb begin
-    serial_event_o = '0;
     illegal_event_o = '0;
     trap_event_o = '0;
-    if (serial_offer_o) begin
-      serial_event_o = saved_q;
-      serial_event_o.retired = 1;
-      serial_event_o.pc_after = next_pc;
-      serial_event_o.rd_value = saved_q.rd_addr == 0 ? 32'd0 : value;
-      serial_event_o.rd_write_mask = saved_q.rd_addr == 0 ? 32'd0 : 32'hffffffff;
-      serial_event_o.csr_effects = effects;
-    end
+    serial_event_o = saved_q;
+    serial_event_o.retired = 1;
+    serial_event_o.pc_after = next_pc;
+    serial_event_o.rd_value = saved_q.rd_addr == 0 ? 32'd0 : value;
+    serial_event_o.rd_write_mask = saved_q.rd_addr == 0 ? 32'd0 : 32'hffffffff;
+    serial_event_o.csr_effects = effects;
     if (illegal_offer_o) begin
       illegal_event_o = saved_q;
       illegal_event_o.rd_addr = 0;

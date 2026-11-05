@@ -23,9 +23,9 @@ def sha(path):
 
 def wire10x(out):
     # the library's own wire load gives a fanout-1 net ~0.33 fF, about a tenth of a short routed net
-    if not out.exists():
-        text, n = re.subn(r"capacitance : 1\.42e-05;", "capacitance : 1.42e-04;", LIB.read_text())
-        assert n == 4, f"expected the 4 wire_load capacitances, found {n}"
+    text, n = re.subn(r"capacitance : 1\.42e-05;", "capacitance : 1.42e-04;", LIB.read_text())
+    assert n == 4, f"expected the 4 wire_load capacitances, found {n}"
+    if not out.exists() or out.read_text() != text:
         out.write_text(text)
     return out
 
@@ -42,7 +42,7 @@ def sta(lib, design, reports, pins=None):
     env = dict(os.environ, TIMING_LIB=str(lib), TIMING_NETLIST=str(design), TIMING_SDC=str(SDC),
                TIMING_REPORTS=str(reports))
     if pins: env["TIMING_PINS"] = str(pins)
-    log = subprocess.run([str(STA), "-no_splash", "-exit", str(ROOT / "tools/timing/sta_repaired.tcl")],
+    log = subprocess.run([str(STA), "-no_init", "-no_splash", "-exit", str(ROOT / "tools/timing/sta_repaired.tcl")],
                          env=env, capture_output=True, text=True)
     name = "sta_paths.log" if pins else "sta.log"
     (reports / name).write_text(log.stdout + log.stderr)
@@ -81,7 +81,7 @@ def worst_pins(r2r_endpoints, attributor, want):
     return pins
 
 
-CHAINS = (("E", ("tage_",)),  # retirement training, added by this plan
+CHAINS = (("E", (".tage_direction.direction.",)),
           ("D", ("lsu.cached.", "load_transaction")),  # load launch through store forwarding
           # frontend-rename loop; the LSU queue pointers are loaded by allocation, so they belong here
           ("C", ("core.frontend", "prediction_", "allocate_", "systems.dispatch", "rename", "rob.", "lsu.queues.")))
@@ -122,9 +122,11 @@ def worst_endpoints(report, attributor, want):
 
 
 def main():
+    global SDC
     parser = argparse.ArgumentParser()
     parser.add_argument("--netlist", type=Path, default=ROOT / "out/chip_timing/mapped.v")
     parser.add_argument("--out", type=Path, default=ROOT / "out/chip_timing_repaired")
+    parser.add_argument("--sdc", type=Path, help="constraints; default: constraints.sdc beside the mapped netlist")
     parser.add_argument("--tag", default="baseline", help="report subdirectory")
     parser.add_argument("--fanout", type=int, default=10)
     parser.add_argument("--top", type=int, default=12)
@@ -132,9 +134,25 @@ def main():
     args = parser.parse_args()
     if not args.netlist.exists():
         sys.exit(f"{args.netlist} is missing; run make chip-timing-check first")
+    source_sdc = args.sdc or args.netlist.parent / "constraints.sdc"
+    if not source_sdc.is_file():
+        sys.exit(f"constraints are missing: {source_sdc}")
+    input_paths = [args.netlist, source_sdc, LIB, STA, ROOT / "tools/run_chip_timing_repaired.py",
+                   *(ROOT / "tools/timing" / name for name in
+                     ("netlist.py", "repair.py", "paths.py", "attribute.py", "sta_repaired.tcl"))]
+    source_receipt = args.netlist.parent / "receipt.json"
+    if source_receipt.is_file():
+        receipt = json.loads(source_receipt.read_text())
+        if receipt.get("netlist_sha256") != sha(args.netlist):
+            sys.exit("synthesis receipt does not match the mapped netlist")
+        input_paths.append(source_receipt)
+    inputs = {str(p.resolve()): sha(p) for p in input_paths}
 
     out = args.out / args.tag
     out.mkdir(parents=True, exist_ok=True)
+    (out / "summary.json").unlink(missing_ok=True)
+    SDC = out / "constraints.sdc"
+    SDC.write_bytes(source_sdc.read_bytes())
     cells = netlist.load(str(args.netlist), str(args.out / "cache"))
     port_names = netlist.ports(str(args.netlist))
     live, new_nets, removed, inserted = repair.repair(cells, port_names, args.fanout)
@@ -145,7 +163,11 @@ def main():
 
     libs = {"ideal": LIB, "wire10x": wire10x(args.out / "sky130_hd_tt_wire10x.lib")}
     attributor = Attributor(live)
-    summary = {"netlist": str(args.netlist), "netlist_sha256": sha(args.netlist), "cuts": args.cut,
+    summary = {"schema": 2, "netlist": str(args.netlist), "netlist_sha256": sha(args.netlist), "cuts": args.cut,
+               "inputs_sha256": inputs, "constraints_sha256": sha(SDC),
+               "opensta_sha256": sha(STA),
+               "repaired_netlist_sha256": sha(design),
+               "source_receipt": str(source_receipt) if source_receipt.is_file() else None,
                "repair": {"fanout": args.fanout, "buffers_removed": removed, "buffers_inserted": inserted,
                           "cells": len(live)},
                "liberty_sha256": {k: sha(v) for k, v in libs.items()}, "columns": {}}
@@ -167,6 +189,9 @@ def main():
               f"input {c['input_to_register']['slack']:.2f}, hold {c['hold']['slack']:.2f}, "
               f"worst endpoint {rows[0]['register']} ({rows[0]['logic_levels']} levels)")
         print("  per chain: " + ", ".join(f"{k} {v['slack']:.2f}" for k, v in sorted(c["worst_per_chain"].items())))
+    for path, expected in inputs.items():
+        if sha(path) != expected:
+            sys.exit(f"timing input changed during run: {path}")
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"summary: {out / 'summary.json'}")
 

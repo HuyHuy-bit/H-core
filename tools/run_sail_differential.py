@@ -117,7 +117,7 @@ def perf_trace(output, end_pc):
     return '\n'.join(lines)
 
 
-def build_fetched(directory=ROOT/'out/sail_fetched_differential/obj_dir', replace=None, config_name='memory_core', bench_defines=()):
+def build_fetched(directory=ROOT/'out/sail_fetched_differential/obj_dir', replace=None, config_name='memory_core', bench_defines=(), attribution=False):
     """Build the fetched core with the program-mode driver; RTL mutants run without RTL assertions.
     The top is trace_lockstep: the trace build drives the bench while the physical build (TRACE=0)
     must match it every cycle."""
@@ -125,6 +125,10 @@ def build_fetched(directory=ROOT/'out/sail_fetched_differential/obj_dir', replac
     make_header()
     flags = ['--Wall','--assert','--top-module','trace_lockstep','--prefix','Vcpu_top',
              *(f'-G{k}={v}' for k,v in config['parameters'].items()), ROOT/config['lint_config'], ROOT/'verif/core/perf_counters.vlt']
+    if attribution:
+        if config_name != 'cached_core': raise ValueError('attribution requires cached_core')
+        flags.append(ROOT/'verif/core/perf_attribution.vlt')
+        bench_defines = (*bench_defines, 'TB_ATTRIBUTION=1')
     if replace and replace[0].startswith('rtl/'): flags += ['-DSYNTHESIS','-Wno-UNUSEDSIGNAL','-Wno-UNUSEDPARAM']
     sources = [str(replace[1]) if replace and p == replace[0] else p
                for p in config['sources']+['verif/core/trace_lockstep.sv','verif/core/fetched_core_tb.cpp']]

@@ -4,7 +4,8 @@
 // TRAIN_QUEUE: the update ports are retirement arrivals; each is hashed with its own retirement-time history into a
 // four-entry queue and one entry trains per cycle. A full queue drops the youngest arrivals (training is not architectural).
 module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, parameter int UPDATES = 1,
-                        parameter bit EXTERNAL_HISTORY = 0, parameter bit TRAIN_QUEUE = 0) (  // AGE_BITS < 18 only to test aging
+                        parameter bit EXTERNAL_HISTORY = 0, parameter bit TRAIN_QUEUE = 0,
+                        parameter bit SERIAL_LOOKUPS = 1) (  // AGE_BITS < 18 only to test aging
   // inputs
   input  wire clk_i, rst_i,
   input  wire [LOOKUPS-1:0] lookup_valid_i,
@@ -109,10 +110,11 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     for (int lane = 0; lane < LOOKUPS; lane++) begin
       lookup_taken_o[lane] = lookup_valid_i[lane]
         && lookup(lookup_pc_i[lane*32+2 +: 16], h, base_q, table_q, !chooser_q[3]).prediction;
-      if (lookup_valid_i[lane] && lookup_branch_i[lane])
+      if (SERIAL_LOOKUPS && lookup_valid_i[lane] && lookup_branch_i[lane])
         h = {h[30:0], lookup_taken_o[lane] && lookup_path_i[lane]};
     end
   end
+  wire unused_lookup_sequence = !SERIAL_LOOKUPS && ^{lookup_branch_i, lookup_path_i};
   for (genvar lane = 0; lane < LOOKUPS; lane++) begin : unused_lookup
     wire unused = ^{lookup_pc_i[lane*32+18 +: 14], lookup_pc_i[lane*32 +: 2]};
   end

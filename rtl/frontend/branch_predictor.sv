@@ -4,7 +4,8 @@
 // recovery restores the stack pointer, not overwritten stack entries.
 module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
                           parameter int HISTORY_BITS = TAGE ? 32 : 8,
-                          parameter int CHECKPOINT_BITS = HISTORY_BITS + 4) (
+                          parameter int CHECKPOINT_BITS = HISTORY_BITS + 4,
+                          parameter bit PARALLEL_TAGE = 0) (
   // inputs
   input  wire clk_i, rst_i,
   input  wire [63:0] pc_i, instruction_i,
@@ -41,7 +42,7 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
       assign outcome[lane] = retire_next_i[lane*32 +: 32] != retire_pc_i[lane*32 +: 32] + 32'd4;
     end
     // Retired branches train one per cycle, in order, from the predictor's queue, hashed with the history they retired under.
-    tage_predictor #(.LOOKUPS(2), .UPDATES(2), .EXTERNAL_HISTORY(1), .TRAIN_QUEUE(1)) direction (
+    tage_predictor #(.LOOKUPS(2), .UPDATES(2), .EXTERNAL_HISTORY(1), .TRAIN_QUEUE(1), .SERIAL_LOOKUPS(!PARALLEL_TAGE)) direction (
       .clk_i, .rst_i, .lookup_valid_i(2'b11), .lookup_pc_i(pc_i), .lookup_history_i(ghr_q),
       .lookup_branch_i(branch), .lookup_path_i(path), .lookup_taken_o(tage_taken),
       .update_valid_i(update), .update_taken_i(outcome), .update_pc_i(retire_pc_i),
@@ -190,6 +191,9 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
 
   // checks
 `ifndef SYNTHESIS
+  always_ff @(posedge clk_i) if (!rst_i && TAGE && PARALLEL_TAGE)
+    assert (!take_i[1] || (take_i[0] && instruction_i[6:0] != 7'h63))
+      else $fatal(1, "PREDICTOR_PARALLEL_PREFIX");
   initial assert (HISTORY_BITS == (TAGE ? 32 : 8) && CHECKPOINT_BITS == HISTORY_BITS + 4
                   && ENTRIES >= 256 && ENTRIES == 2**IW) else $fatal(1, "PREDICTOR_GEOMETRY");
 `endif

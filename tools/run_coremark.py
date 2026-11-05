@@ -29,6 +29,17 @@ FLAGS = ['-O2', '-march=rv32i', '-mabi=ilp32']
 ROB_N = 32
 PROFILES = ('early_load_core', 'cached_core')
 LATENCIES = (1, 10, 50)
+RECEIPT_SCHEMA = 3
+SHARED_INPUTS = (
+    'tools/run_coremark.py', 'tools/run_cpi.py', 'tools/run_sail_differential.py',
+    'verif/core/fetched_core_tb.cpp', 'verif/core/trace_lockstep.sv',
+    'verif/core/core_reference.hpp', 'verif/core/perf_counters.vlt', 'verif/core/reference.py',
+    'verif/core/perf_attribution.hpp', 'verif/core/perf_attribution_sample.hpp', 'verif/core/perf_attribution.vlt',
+    'verif/lockstep/comparator.py', 'verif/lockstep/generated/commit_event.py',
+    'config/platform.yaml', 'config/memory_protocol.yaml', 'config/commit_event.yaml',
+    'config/toolchain.lock', 'sw/coremark/start.S', 'sw/coremark/core_portme.c',
+    'sw/coremark/core_portme.h', 'sw/link/platform.ld',
+)
 
 
 def fetch():
@@ -65,6 +76,69 @@ def digest(*items):
     return h.hexdigest()
 
 
+def manifest_digest(manifest):
+    return digest(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode())
+
+
+def input_files(profile, config):
+    return sorted(set(config['sources'] + [f'config/{profile}.json', config['lint_config'], *SHARED_INPUTS]))
+
+
+def snapshot(paths):
+    return {str(path): digest(ROOT/path) for path in paths}
+
+
+def verify_snapshot(inputs):
+    for name, expected in inputs.items():
+        if not (ROOT/name).is_file() or digest(ROOT/name) != expected:
+            raise RuntimeError(f'measurement input changed during run: {name}')
+
+
+def run_manifest(profile, config, inputs, tools, image, iterations, warmup, program, latency):
+    return dict(schema=RECEIPT_SCHEMA, profile=profile, parameters=config['parameters'],
+                inputs_sha256=inputs, tools=tools, image_sha256=digest(image),
+                coremark_revision=REVISION, flags=FLAGS, iterations=iterations, warmup=warmup,
+                region=list(program['warm']), terminal=program['terminal'], rob_window=ROB_N,
+                read_latency=latency, write_latency=latency, seed=1, mode='perf')
+
+
+def cached_result(previous, manifest):
+    if previous.get('schema') != RECEIPT_SCHEMA:
+        return None
+    key = manifest_digest(manifest)
+    matches = [row for row in previous.get('results', [])
+               if row.get('inputs_sha256') == key and row.get('manifest') == manifest
+               and row.get('profile') == manifest['profile'] and row.get('latency') == manifest['read_latency']
+               and row.get('validation', {}).get('status') == 'pass']
+    return matches[0] if len(matches) == 1 else None
+
+
+def receipt_status(results, manifests, census_only):
+    if census_only:
+        return 'census_only'
+    expected = {manifest_digest(m) for m in manifests}
+    actual = [row.get('inputs_sha256') for row in results
+              if row.get('manifest') is not None and row['inputs_sha256'] == manifest_digest(row['manifest'])
+              and row.get('validation', {}).get('status') == 'pass']
+    return 'pass' if len(actual) == len(results) == len(manifests) and set(actual) == expected else 'partial'
+
+
+def tool_versions():
+    versions = {'python': sys.version}
+    for tool in ('verilator', 'g++', 'make', 'riscv64-unknown-elf-gcc',
+                 'riscv64-unknown-elf-objcopy', 'riscv64-unknown-elf-nm'):
+        result = subprocess.run([tool, '--version'], check=True, capture_output=True, text=True)
+        versions[tool] = result.stdout.splitlines()[0]
+    return versions
+
+
+def publish(path, receipt, inputs):
+    verify_snapshot(inputs)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(receipt, indent=2)+'\n')
+    temporary.replace(path)
+
+
 def mem_bytes(event, mask):
     return {(event['mem_address'] & ~3) + lane for lane in range(4) if (mask >> lane) & 1}
 
@@ -90,21 +164,31 @@ def run_rtl(binary, image_path, program, latency, expected):
                '+warm=' + ':'.join(map(str, program['warm']))]
     result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=7200)
     if result.returncode: raise RuntimeError(result.stdout[-1500:])
+    if 'CORE PASS' not in result.stdout:
+        raise RuntimeError('CoreMark RTL run did not reach CORE PASS')
     perf, counters = check(result.stdout, program, expected)
-    return dict(**perf, counters=counters)
+    return dict(**perf, counters=counters,
+                validation=dict(status='pass', output_sha256=digest(result.stdout.encode())))
 
 
 def main():
+    global OUT
     import argparse
     parser = argparse.ArgumentParser()
     # Both traces stay in memory; three iterations (2.3M events) exceed an 8 GB host.
     parser.add_argument('--iterations', type=int, default=2)
     parser.add_argument('--warmup', type=int, default=1, help='iterations before the kernel region')
     parser.add_argument('--census-only', action='store_true')
+    parser.add_argument('--out', type=Path, default=OUT, help='isolated output and receipt directory')
     args = parser.parse_args()
     if not 0 <= args.warmup < args.iterations: raise ValueError('warmup must leave at least one region iteration')
+    OUT = args.out.resolve()
     fetch()
+    configs = {profile: json.loads((ROOT/f'config/{profile}.json').read_text()) for profile in PROFILES}
+    inputs = snapshot(sorted({p for profile, config in configs.items() for p in input_files(profile, config)}))
+    tools = tool_versions()
     image, symbols = build(args.iterations)
+    image_sha256 = digest(image)
     reference = Reference(image)
     expected = []
     while not expected or expected[-1]['pc_before'] != symbols['coremark_done']:
@@ -122,36 +206,42 @@ def main():
     counts = census(expected)
     print(f'CoreMark x{args.iterations}: {len(expected)} instructions, validated; census (window {ROB_N}) {counts}', flush=True)
     receipt_path = OUT/'receipt.json'
-    receipt = dict(schema=2, status='partial', coremark_revision=REVISION, flags=FLAGS, iterations=args.iterations,
+    receipt = dict(schema=RECEIPT_SCHEMA, status='partial', coremark_revision=REVISION, flags=FLAGS, iterations=args.iterations,
                    warmup=args.warmup, region=dict(start=['core_bench_list', 2*args.warmup + 1], end=['stop_time', 1]),
                    instructions=len(expected), rob_window=ROB_N, census=counts, results=[],
-                   claim='CoreMark 2K performance run validates on the reference; RTL traces match it. Census counts '
-                         'are an upper bound on partial store overlaps.')
-    # A recorded run is reused only while the image, RTL sources and bench it ran on are unchanged.
-    previous = json.loads(receipt_path.read_text()).get('results', []) if receipt_path.exists() else []
+                   inputs_sha256=inputs, tools=tools, image_sha256=image_sha256,
+                   profiles=list(PROFILES), latencies=list(LATENCIES),
+                   claim='CoreMark 2K validates on the reference; each RTL row includes trace comparison and '
+                         'independent counter recount. Census counts are an upper bound on partial store overlaps.')
+    previous = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+    manifests = [run_manifest(profile, config, {p: inputs[p] for p in input_files(profile, config)}, tools,
+                              image, args.iterations, args.warmup, program, latency)
+                 for profile, config in configs.items() for latency in LATENCIES]
+    if args.census_only:
+        receipt['claim'] = 'Reference-only CoreMark validation and store-overlap census; no RTL result is claimed.'
+    publish(receipt_path, receipt, inputs)
     for profile in () if args.census_only else PROFILES:
-        config = json.loads((ROOT/f'config/{profile}.json').read_text())
-        inputs = digest(image, *(ROOT/s for s in config['sources'] + [f'config/{profile}.json', config['lint_config'],
-                                                                     'verif/core/fetched_core_tb.cpp', 'verif/core/trace_lockstep.sv']))
         binary = None
         for latency in LATENCIES:
-            done = next((r for r in previous if (r['profile'], r['latency'], r.get('inputs_sha256'))
-                         == (profile, latency, inputs)), None)
+            manifest = next(m for m in manifests if m['profile'] == profile and m['read_latency'] == latency)
+            done = cached_result(previous, manifest)
             if done: print(f'CPI {profile} latency={latency}: recorded, skipped', flush=True)
             else:
                 binary = binary or build_fetched(OUT/f'obj_{profile}', config_name=profile)[0]
                 perf = run_rtl(binary, OUT/'coremark.bin', program, latency, expected)
-                done = dict(profile=profile, latency=latency, inputs_sha256=inputs, **perf)
+                done = dict(profile=profile, latency=latency, inputs_sha256=manifest_digest(manifest),
+                            manifest=manifest, **perf)
+            if digest((OUT/'coremark.bin').read_bytes()) != image_sha256:
+                raise RuntimeError('CoreMark image changed during run')
             receipt['results'].append(done)
-            receipt_path.write_text(json.dumps(receipt, indent=2)+'\n')
+            publish(receipt_path, receipt, inputs)
             print(f'CPI {profile} latency={latency}: whole {done["cycles"]/done["retired"]:.3f} '
                   f'({done["cycles"]} cycles, {done["retired"]} retired); kernel {done["warm_cycles"]/done["warm_retired"]:.3f} '
                   f'({done["warm_cycles"]} cycles, {done["warm_retired"]} retired); boot {done["warm_start"]} cycles, '
                   f'tail {done["cycles"] - done["warm_start"] - done["warm_cycles"]} cycles', flush=True)
-    if args.census_only: receipt['results'] = previous
-    receipt['status'] = 'pass' if len(receipt['results']) == len(PROFILES)*len(LATENCIES) else 'partial'
-    receipt_path.write_text(json.dumps(receipt, indent=2)+'\n')
-    print(f'CoreMark check: {receipt["status"].upper()}; receipt {(OUT/"receipt.json").relative_to(ROOT)}')
+    receipt['status'] = receipt_status(receipt['results'], manifests, args.census_only)
+    publish(receipt_path, receipt, inputs)
+    print(f'CoreMark check: {receipt["status"].upper()}; receipt {receipt_path}')
 
 
 if __name__ == '__main__':

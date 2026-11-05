@@ -72,7 +72,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   wire [31:0] head_pc;
   commit_event_pkg::commit_event_t serial_event, illegal_event;
   wire [1:0] backend_complete_accept;
-  wire memory_serial_offer, memory_fault_offer, memory_trap_ready, memory_read;
+  wire memory_serial_owner, memory_serial_offer, memory_fault_offer, memory_trap_ready, memory_read;
   wire [12:0] memory_serial_id, memory_fault_id;
   commit_event_pkg::commit_event_t memory_serial_event, memory_fault_event;
   wire raw_offer = illegal_offer || memory_fault_offer;
@@ -215,10 +215,21 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     assign system_sources = EARLY_LOADS && memory_read ? lsu_head_sources : dispatch_sources;
     assign head_read = (owner_valid && !owner_memory) || memory_read;
     assign serial_offer = system_offer || memory_serial_offer;
-    assign serial_id = memory_serial_offer ? memory_serial_id : system_serial_id;
-    assign serial_event = memory_serial_offer ? memory_serial_event : system_serial_event;
+    assign serial_id = memory_serial_owner ? memory_serial_id : system_serial_id;
+    assign serial_event = memory_serial_owner ? memory_serial_event : system_serial_event;
     assign system_trap_valid_o = system_trap_valid && (!memory_head || memory_trap_ready);
     assign system_trap_event_o = system_trap_valid_o ? system_trap_event : '0;
+
+`ifndef SYNTHESIS
+    always_ff @(posedge clk_i) if (!rst_i) begin
+      assert (!(system_offer && memory_serial_offer)
+          && (!memory_serial_offer || memory_serial_owner) && (!system_offer || !memory_serial_owner))
+        else $fatal(1, "SERIAL_PAYLOAD_OWNER");
+      assert ((!memory_serial_offer || (serial_id == memory_serial_id && serial_event == memory_serial_event))
+          && (!system_offer || (serial_id == system_serial_id && serial_event == system_serial_event)))
+        else $fatal(1, "SERIAL_PAYLOAD_ROUTE");
+    end
+`endif
 
     // serialized dispatch ownership
     head_dispatch #(.HOLD_MEMORY(!EARLY_LOADS)) dispatch (
@@ -270,7 +281,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
         .prepare_o(memory_prepare_o), .busy_o(head_busy),
         .admission_valid_o, .admission_id_o, .admission_address_o, .admission_data_o,
         .admission_mask_o, .admission_size_o, .admit_valid_i, .admit_id_i,
-        .serial_offer_o(memory_serial_offer), .serial_id_o(memory_serial_id), .serial_event_o(memory_serial_event),
+        .serial_offer_o(memory_serial_offer), .serial_owner_o(memory_serial_owner), .serial_id_o(memory_serial_id), .serial_event_o(memory_serial_event),
         .serial_accept_i(serial_accept && memory_serial_offer),
         .fault_offer_o(memory_fault_offer), .fault_id_o(memory_fault_id), .fault_event_o(memory_fault_event),
         .fault_accept_i(memory_fault_offer && backend_complete_accept[0]),
@@ -380,7 +391,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     assign system_trap_valid_o = 0;
     assign system_trap_event_o = '0;
     wire unused_system = cancel_system_i ^ head_valid ^ ^head_pc ^ ^rename_source ^ ^rename_source2 ^ ^read_ready
-      ^ serial_accept ^ illegal_accept ^ memory_serial_offer ^ memory_trap_ready ^ memory_read ^ ^memory_serial_id
+      ^ serial_accept ^ illegal_accept ^ memory_serial_owner ^ memory_serial_offer ^ memory_trap_ready ^ memory_read ^ ^memory_serial_id
       ^ ^memory_serial_event;
   end
 
@@ -395,7 +406,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   if (!MEMORY_SERVICE) begin : no_memory
     assign {memory_prepare_o, memory_busy_o, memory_committed_o, memory_irrevocable_o, memory_fatal_o} = 0;
     assign {committed_valid_o, committed_address_o, committed_data_o, committed_mask_o} = 0;
-    assign {memory_read, memory_serial_offer, memory_fault_offer, memory_trap_ready} = 0;
+    assign {memory_serial_owner, memory_read, memory_serial_offer, memory_fault_offer, memory_trap_ready} = 0;
     assign {memory_serial_id, memory_fault_id, admission_id_o} = 0;
     assign {memory_serial_event, memory_fault_event, data_request_o} = '0;
     assign {admission_valid_o, admission_address_o, admission_data_o, admission_mask_o, admission_size_o} = 0;

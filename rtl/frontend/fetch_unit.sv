@@ -4,7 +4,8 @@
 // whose hit fills the ahead buffer. REDIRECT_CYCLE=1 looks a redirect target up from pc_q the next cycle (ruling Q7).
 module fetch_unit #(parameter bit PREDICT = 0, parameter bit AHEAD = 0,
                     parameter bit TAGE = 0, parameter int CHECKPOINT_BITS = TAGE ? 36 : 12,
-                    parameter bit ICACHE = 0, parameter bit REDIRECT_CYCLE = 1, parameter int L0_LINES = 4) (  // L0_LINES: a power of two
+                    parameter bit ICACHE = 0, parameter bit REDIRECT_CYCLE = 1, parameter int L0_LINES = 4,
+                    parameter bit PARALLEL_TAGE = 0) (  // L0_LINES: a power of two
   // inputs
   input  wire clk_i, rst_i, enable_i,
   input  wire redirect_i,
@@ -26,6 +27,9 @@ module fetch_unit #(parameter bit PREDICT = 0, parameter bit AHEAD = 0,
   output wire response_ready_o,
   output logic [1:0] valid_o,
   output logic [63:0] instruction_o, pc_o,
+  // decode payload is qualified only by valid_o at the consumer.
+  output wire [63:0] decode_instruction_o,
+  output wire decode_fault_o,
   output wire fault_o,
   output wire [31:0] fault_cause_o,
   output wire busy_o,
@@ -69,7 +73,7 @@ module fetch_unit #(parameter bit PREDICT = 0, parameter bit AHEAD = 0,
 
   // branch prediction
   if (PREDICT) begin : prediction
-    branch_predictor #(.TAGE(TAGE)) predictor (
+    branch_predictor #(.TAGE(TAGE), .PARALLEL_TAGE(PARALLEL_TAGE)) predictor (
       .clk_i, .rst_i, .pc_i(pc_o), .instruction_i(words), .taken_o(taken), .target_o(target),
       .take_i(take_i & {2{state_q == BUFFER}}), .checkpoint_o(predict_checkpoint_o), .redirect_i, .repair_i,
       .repair_checkpoint_i, .retire_i, .retire_instruction_i, .retire_pc_i, .retire_next_i
@@ -90,10 +94,14 @@ module fetch_unit #(parameter bit PREDICT = 0, parameter bit AHEAD = 0,
   wire jump = predict_taken_o[last];
   wire [31:0] jump_pc = last ? target[63:32] : target[31:0];
   wire crossing = {1'b0, pc_q[4:2]} + (take_i[1] ? 4'd2 : 4'd1) >= 4'd8;
-  wire leave = state_q == BUFFER && take_i[0] && !redirect_i && (jump ? jump_pc[31:5] != pc_q[31:5] : crossing);
-  wire [26:0] next_line = jump ? jump_pc[31:5] : pc_q[31:5] + 27'd1;
+  wire [26:0] sequential_line = pc_q[31:5] + 27'd1;
+  // Compare early targets before late dispatch selects a lane or a predicted jump.
+  wire [1:0] jump_crossing = {target[63:37] != pc_q[31:5], target[31:5] != pc_q[31:5]};
+  wire leave = state_q == BUFFER && take_i[0] && !redirect_i && (jump ? jump_crossing[last] : crossing);
   wire ahead_flight = ahead_q == A_REQ || ahead_q == A_RESP;
-  wire ahead_match = ahead_q != A_IDLE && ahead_line_q == next_line;
+  wire [1:0] ahead_predicted = {ahead_line_q == target[63:37], ahead_line_q == target[31:5]};
+  wire ahead_sequential = ahead_line_q == sequential_line;
+  wire ahead_match = ahead_q != A_IDLE && (jump ? ahead_predicted[last] : ahead_sequential);
   wire ahead_cancel = redirect_i || (leave && !ahead_match) || (state_q == EMPTY && ahead_q == A_HAVE);
   // lines left: a predicted jump back to one swaps it in without an instruction-memory request.
   logic [L0_LINES-1:0] l0_hit_vec, l0_seq_vec, l0_redirect_vec;
@@ -101,8 +109,9 @@ module fetch_unit #(parameter bit PREDICT = 0, parameter bit AHEAD = 0,
   always_comb begin
     l0_data = '0;
     for (int n = 0; n < L0_LINES; n++) begin
-      l0_hit_vec[n] = l0_valid_q[n] && l0_line_q[n] == next_line;
-      l0_seq_vec[n] = l0_valid_q[n] && l0_line_q[n] == pc_q[31:5] + 27'd1;
+      l0_hit_vec[n] = l0_valid_q[n] && (jump ? (last ? l0_line_q[n] == target[63:37]
+          : l0_line_q[n] == target[31:5]) : l0_line_q[n] == sequential_line);
+      l0_seq_vec[n] = l0_valid_q[n] && l0_line_q[n] == sequential_line;
       l0_redirect_vec[n] = l0_valid_q[n] && l0_line_q[n] == redirect_pc_i[31:5];
       if (redirect_i ? l0_redirect_vec[n] : l0_hit_vec[n]) l0_data |= l0_data_q[n];
     end
@@ -181,6 +190,9 @@ module fetch_unit #(parameter bit PREDICT = 0, parameter bit AHEAD = 0,
   assign fault_o = valid_o[0] && state_q == FAULT;
   assign fault_cause_o = misaligned_q ? CAUSE_INSTRUCTION_ADDRESS_MISALIGNED
                                     : CAUSE_INSTRUCTION_ACCESS_FAULT;
+
+  assign decode_instruction_o = state_q == BUFFER ? words : 64'd0;
+  assign decode_fault_o = state_q == FAULT;
 
   // request formatting and lane delivery
   always_comb begin

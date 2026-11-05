@@ -43,6 +43,10 @@ system-core-check:
 unit-runner-check:
 	@python3 -m unittest -v tests/test_unit_runner.py
 
+.PHONY: measurement-check
+measurement-check:
+	@python3 -m unittest -v tests/test_measurement_receipts.py
+
 head-trap-core-check:
 	@python3 tools/run_unit.py head_trap_core --suite "$(OSS_CAD_SUITE)"
 
@@ -138,7 +142,7 @@ l1-icache-check:
 .PHONY: tage-predictor-check
 tage-predictor-check:
 	@verilator --lint-only -Wall rtl/frontend/tage_predictor.sv
-	@python3 -m unittest -v tests/test_tage_predictor_rtl.py tests/test_tage_integration_rtl.py
+	@python3 -m unittest -v tests/test_tage_predictor_rtl.py tests/test_tage_integration_rtl.py tests/test_tage_parallel_rtl.py
 
 .PHONY: load-store-unit-check
 load-store-unit-check:
@@ -157,7 +161,7 @@ sail-fetched-differential-check:
 spike-fetched-differential-check:
 	@python3 tools/run_sail_differential.py --reference spike --spike "$(LOCKSTEP_SPIKE)"
 
-check-fast: branch-predictor-check load-store-unit-check load-store-queue-random-check unit-runner-check platform-check event-check memory-protocol-check lockstep-check act4-check prf-check a1-probe-check sail-log-check
+check-fast: branch-predictor-check load-store-unit-check load-store-queue-random-check unit-runner-check measurement-check platform-check event-check memory-protocol-check lockstep-check act4-check prf-check a1-probe-check sail-log-check
 	@python3 tools/check_s0.py
 	@git diff --check
 

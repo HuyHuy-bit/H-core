@@ -59,16 +59,19 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   assign flush_ready_o = !memory_irrevocable_o;
   wire [1:0] supported, backend_valid, frontend_fault;
   wire [63:0] frontend_cause, frontend_value;
+  wire [63:0] decode_instruction;
+  wire decode_fault;
 
   // frontend fault classification
   if (FRONTEND_FAULTS) begin : faults
     // turns fetch faults and ecall/ebreak/illegal into per-lane fault tokens.
     frontend_fault_decode decode (
-      .valid_i(fetch_valid_o), .instruction_i(fetch_instruction_o), .pc_i(fetch_pc_o),
-      .fetch_fault_i(fetch_fault_o), .fetch_cause_i(fetch_fault_cause_o),
+      .valid_i(2'b11), .instruction_i(decode_instruction), .pc_i(fetch_pc_o),
+      .fetch_fault_i(decode_fault), .fetch_cause_i(fetch_fault_cause_o),
       .fault_o(frontend_fault), .cause_o(frontend_cause), .value_o(frontend_value)
     );
   end else begin : no_faults
+    wire unused_decode_fault = decode_fault;
     assign frontend_fault = 0;
     assign frontend_cause = 0;
     assign frontend_value = 0;
@@ -127,11 +130,12 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   end
 
   // instruction fetch and prediction
-  fetch_unit #(.PREDICT(1), .AHEAD(1), .TAGE(TAGE), .ICACHE(ICACHE)) frontend (
+  fetch_unit #(.PREDICT(1), .AHEAD(1), .TAGE(TAGE), .ICACHE(ICACHE), .PARALLEL_TAGE(1)) frontend (
     .clk_i, .rst_i, .enable_i(fetch_enable && !drained && !memory_fatal_o),
     .redirect_i(redirect_o), .redirect_pc_i(redirect_pc_o), .invalidate_i(icache_invalidate), .hold_i(fetch_hold),
     .request_valid_o, .request_ready_i, .request_o, .response_valid_i, .response_ready_o, .response_i,
     .valid_o(fetch_valid_o), .take_i(dispatch_o), .instruction_o(fetch_instruction_o), .pc_o(fetch_pc_o),
+    .decode_instruction_o(decode_instruction), .decode_fault_o(decode_fault),
     .fault_o(fetch_fault_o), .fault_cause_o(fetch_fault_cause_o), .busy_o(fetch_busy_o), .fatal_o(fetch_fatal),
     .predict_taken_o(predicted_taken), .predict_pc_o(predicted_pc), .predict_checkpoint_o(predicted_checkpoint),
     .repair_i(running && branch_redirect && !flush && !system_redirect), .repair_checkpoint_i(redirect_checkpoint),
@@ -154,7 +158,7 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
     .icache_invalidate_o(icache_invalidate), .fetch_hold_o(fetch_hold),
     .system_trap_valid_o(trap_valid_o), .system_trap_event_o(trap_event_o),
     .clk_i, .rst_i, .flush_i(flush && running), .drained_i(drained),
-    .valid_i(backend_valid), .instruction_i(fetch_instruction_o), .pc_i(fetch_pc_o),
+    .valid_i(backend_valid), .instruction_i(decode_instruction), .pc_i(fetch_pc_o),
     .frontend_fault_i(frontend_fault), .frontend_cause_i(frontend_cause), .frontend_value_i(frontend_value),
     .predicted_pc_i(predicted_pc), .predicted_taken_i(predicted_taken), .predicted_checkpoint_i(predicted_checkpoint),
     .redirect_checkpoint_o(redirect_checkpoint),

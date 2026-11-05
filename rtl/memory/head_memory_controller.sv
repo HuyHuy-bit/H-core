@@ -29,7 +29,7 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
   output wire [31:0] admission_address_o, admission_data_o,
   output wire [3:0] admission_mask_o,
   output wire [1:0] admission_size_o,
-  output wire serial_offer_o,
+  output wire serial_offer_o, serial_owner_o,
   output wire [12:0] serial_id_o,
   output commit_event_pkg::commit_event_t serial_event_o,
   output wire fault_offer_o,
@@ -85,7 +85,8 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
   assign fault_offer_o = result_live && result_fault && !fault_sent_q;
   // retain fault ownership until accepted trap entry.
   assign trap_ready_o = result_live && result_fault && fault_sent_q;
-  assign serial_id_o = serial_offer_o ? id : 13'd0;
+  assign serial_owner_o = owner_q;
+  assign serial_id_o = id;
   assign fault_id_o = fault_offer_o ? id : 13'd0;
 
   // memory retirement and fault events
@@ -100,24 +101,21 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
     base_event.rs1_value = source1;
     base_event.rs2_addr = store ? instruction[24:20] : 5'd0;
     base_event.rs2_value = source2;
-    serial_event_o = '0;
     fault_event_o = '0;
-    if (serial_offer_o) begin
-      serial_event_o = base_event;
-      serial_event_o.retired = 1;
-      serial_event_o.pc_after = pc + 32'd4;
-      serial_event_o.mem_valid = 1;
-      serial_event_o.mem_address = cached_store ? address : result_address;
-      if (cached_store || result_store) begin
-        serial_event_o.mem_write_mask = cached_store ? mask : result_mask;
-        serial_event_o.mem_write_data = cached_store ? write_data : result_write_data;
-      end else begin
-        serial_event_o.rd_addr = instruction[11:7];
-        serial_event_o.rd_value = instruction[11:7] == 0 ? 32'd0 : result_data;
-        serial_event_o.rd_write_mask = instruction[11:7] == 0 ? 32'd0 : 32'hffffffff;
-        serial_event_o.mem_read_mask = result_mask;
-        serial_event_o.mem_read_data = (result_data << {result_address[1:0], 3'b000}) & byte_mask(result_mask);
-      end
+    serial_event_o = base_event;
+    serial_event_o.retired = 1;
+    serial_event_o.pc_after = pc + 32'd4;
+    serial_event_o.mem_valid = 1;
+    serial_event_o.mem_address = cached_store ? address : result_address;
+    if (store) begin
+      serial_event_o.mem_write_mask = cached_store ? mask : result_mask;
+      serial_event_o.mem_write_data = cached_store ? write_data : result_write_data;
+    end else begin
+      serial_event_o.rd_addr = instruction[11:7];
+      serial_event_o.rd_value = instruction[11:7] == 0 ? 32'd0 : result_data;
+      serial_event_o.rd_write_mask = instruction[11:7] == 0 ? 32'd0 : 32'hffffffff;
+      serial_event_o.mem_read_mask = result_mask;
+      serial_event_o.mem_read_data = (result_data << {result_address[1:0], 3'b000}) & byte_mask(result_mask);
     end
     if (fault_offer_o) begin
       fault_event_o = base_event;
@@ -193,6 +191,8 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
         && (!trap_accept_i || trap_ready_o)) else $fatal(1, "HEAD_MEMORY_ACCEPT");
       assert (commit_accept == (accepted_serial && cached_store)) else $fatal(1, "HEAD_MEMORY_COMMIT");
       assert (!result_valid || (owner_q && launched_q && result_id == id)) else $fatal(1, "HEAD_MEMORY_RESULT");
+      assert (!serial_offer_o || cached_store || result_store == store)
+        else $fatal(1, "HEAD_MEMORY_SERIAL_KIND");
       assert (!prepare_o || (!owner_q && !path_busy)) else $fatal(1, "HEAD_MEMORY_PREPARE");
       if (active && !cancel_i) begin
         assert (!admit_valid_i || admission_valid_o) else $fatal(1, "HEAD_MEMORY_ADMISSION");

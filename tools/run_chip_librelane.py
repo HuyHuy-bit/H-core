@@ -3,6 +3,7 @@
 
 import argparse
 import json
+from pathlib import Path
 import shutil
 import subprocess
 
@@ -14,6 +15,7 @@ OUT = ROOT / "out/chip_librelane"
 
 
 def main() -> None:
+    global OUT
     parser = argparse.ArgumentParser()
     parser.add_argument("--to", help="last LibreLane step id to run, e.g. OpenROAD.ResizerTimingPostCTS")
     parser.add_argument("--threads", type=int, default=4, help="detailed-routing threads; each costs memory")
@@ -21,7 +23,10 @@ def main() -> None:
     parser.add_argument("--from", dest="start", help="start at this step instead of overwriting the run")
     parser.add_argument("--state", help="initial state JSON for --from; resuming without one chains onto the run's last state")
     parser.add_argument("--tag", default="latest", help="run directory name under out/chip_librelane/runs")
+    parser.add_argument("--out", type=Path, help="isolated config, constraints and run directory")
     args = parser.parse_args()
+    if args.out:
+        OUT = args.out.resolve()
     if not shutil.which("librelane"):
         raise RuntimeError("librelane not on PATH")
     OUT.mkdir(parents=True, exist_ok=True)

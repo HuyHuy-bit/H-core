@@ -46,14 +46,23 @@ def main() -> None:
     parser.add_argument("--sources-config", default=DEFAULT_SOURCES, help="config/NAME.json with a sources list")
     parser.add_argument("--period", type=float, help="clock period in ns; default: the A1 intent's")
     parser.add_argument("--abc-period", type=float, help="period ABC maps to, in ns; default: the clock period")
+    parser.add_argument("--out", type=Path, help="isolated output directory within the repository")
     args = parser.parse_args()
     global OUT, TOP, SOURCES
     TOP = args.top
     # chip_top keeps out/chip_timing so existing consumers still find its receipt.
-    OUT = ROOT / "out/chip_timing" / ("" if TOP == DEFAULT_TOP else TOP)
+    OUT = args.out.resolve() if args.out else ROOT / "out/chip_timing" / ("" if TOP == DEFAULT_TOP else TOP)
+    if not OUT.is_relative_to(ROOT):
+        parser.error("--out must be within the repository")
     SOURCES = json.loads((ROOT / f"config/{args.sources_config}.json").read_text())["sources"]
     if TOP == DEFAULT_TOP:
         SOURCES = SOURCES + ["rtl/core/chip_top.sv"]
+    input_paths = SOURCES + [
+        f"config/{args.sources_config}.json", "config/a1_timing.json", "config/a1_timing.lock",
+        "config/synthesis.lock", "synth/a1_timing.tcl", "tools/run_chip_timing.py",
+        "tools/run_a1_timing.py", "tools/run_a1_probe.py", "tools/fetch_a1_timing.py",
+    ]
+    inputs = {p: digest(ROOT / p) for p in input_paths}
     OUT.mkdir(parents=True, exist_ok=True)
     receipt = OUT / "receipt.json"
     receipt.unlink(missing_ok=True)
@@ -112,10 +121,15 @@ def main() -> None:
     if not slack or not end:
         raise RuntimeError("missing register-to-register path")
     register = re.search(rf"(?m)^  \S+ {re.escape(end[1])} \(\n(?:    \..*\n)*?    \.Q\(([^()]+)\)", netlist)
-    results = {"schema": 1, "inputs_sha256": {p: digest(ROOT / p) for p in SOURCES + [
-                   f"config/{args.sources_config}.json", "config/a1_timing.json", "config/a1_timing.lock",
-                   "config/synthesis.lock", "synth/a1_timing.tcl", "tools/run_chip_timing.py",
-                   "tools/run_a1_timing.py"]},
+    for path, expected in inputs.items():
+        if digest(ROOT / path) != expected:
+            raise RuntimeError(f"synthesis input changed during run: {path}")
+    results = {"schema": 2, "inputs_sha256": inputs,
+               "invocation": {"top": TOP, "sources_config": args.sources_config,
+                              "period_ns": config["period_ns"],
+                              "abc_period_ns": args.abc_period or config["period_ns"]},
+               "constraints_sha256": digest(OUT / "constraints.sdc"),
+               "synthesis_script_sha256": digest(OUT / "synth.ys"),
                "intent": config, "library": lock["library"], "opensta": lock["opensta"],
                "physical_implementation": False, "mapped_simulation": False,
                "cell_counts": dict(sorted(counts.items())), "stored_bits": bits,
