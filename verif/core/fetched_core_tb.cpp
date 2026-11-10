@@ -8,6 +8,9 @@
 #include "Vcpu_top.h"
 #include "Vcpu_top___024root.h"
 #include "verilated.h"
+#if VM_TRACE
+#include "verilated_vcd_c.h"
+#endif
 #include "fields.hpp"
 #include "../common/packed_bits.hpp"
 #include <algorithm>
@@ -168,6 +171,22 @@ int main(int argc,char** argv) {
         auto memory=image, shadow=image;
         std::array<uint8_t,48> mmio{};
         Vcpu_top dut;
+#if VM_TRACE
+        Verilated::traceEverOn(true);
+        VerilatedVcdC waveform;
+        if (!plusarg("wave").empty()) {
+            dut.trace(&waveform,4);
+            waveform.set_time_unit("1ns");
+            waveform.set_time_resolution("1ns");
+            waveform.open(plusarg("wave").c_str());
+            require(waveform.isOpen(),"cannot open waveform");
+        }
+        vluint64_t wave_time=0;
+        auto dump_wave=[&] { if (waveform.isOpen()) waveform.dump(wave_time); wave_time+=5; };
+#else
+        require(plusarg("wave").empty(),"waveform requires a --trace build");
+        auto dump_wave=[] {};
+#endif
         Transaction instruction, data;
         std::array<uint32_t,REQUEST_WORDS> held_i{}, held_d{};
         bool hold_i=false, hold_d=false, reset_done=false;
@@ -190,7 +209,7 @@ int main(int argc,char** argv) {
             cached_writes.clear(); mmio_writes.clear(); mmio_reads.clear(); mmio_read_count=0; line_reads=0;
             hold_i=hold_d=false; events=0; halted=tohost_retired=false;
             dut.rst_i=1; dut.response_valid_i=0; dut.data_response_valid_i=0;
-            for (int n=0;n<3;++n) { dut.clk_i=0; dut.eval(); dut.clk_i=1; dut.eval(); }
+            for (int n=0;n<3;++n) { dut.clk_i=0; dut.eval(); dump_wave(); dut.clk_i=1; dut.eval(); dump_wave(); }
             dut.rst_i=0;
             std::cout<<"RESET\n";
         };
@@ -343,6 +362,7 @@ int main(int argc,char** argv) {
             dut.eval();
             dut.admit_valid_i=dut.admission_valid_o; dut.admit_id_i=dut.admission_id_o;
             dut.eval();
+            dump_wave();
             if (!reset_done && events>100 && ((mode=="reset_fetch" && instruction.pending)
                 || (mode=="reset_data" && data.pending) || (mode=="reset_commit" && dut.retire_valid_o))) {
                 reset(); reset_done=true; draining=false; continue;
@@ -379,6 +399,7 @@ int main(int argc,char** argv) {
             if (dut.request_valid_o && dut.request_ready_i) accept(instruction,dut.request_o,false);
             if (dut.data_request_valid_o && dut.data_request_ready_i) accept(data,dut.data_request_o,true);
             dut.clk_i=1; dut.eval();
+            dump_wave();
             require(!dut.fatal_o,"platform fatal");
             require(act4 || events<=target,"retired past the event limit");
             // A falling drain request marks an on-chip identity recycle.

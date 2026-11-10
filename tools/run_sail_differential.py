@@ -79,11 +79,10 @@ def compare_output(output, expected, boot):
 
 
 COUNTERS = set(range(0xb00,0xba0)) | set(range(0xc00,0xca0))
-DIRECTED = ('recovery_during_load_miss','mmio_bypasses_dcache','fence_i_after_store') + STORE_BUFFER_PROGRAMS
+DIRECTED = ('recovery_during_load_miss','mmio_bypasses_dcache','fence_i_after_store','memory_pairs_with_alu') + STORE_BUFFER_PROGRAMS
 # Every uncached read reaches the port, so each program's UART reads count exactly.
-MMIO_READS = {'mmio_bypasses_dcache':2, 'mmio_store_after_cacheable_stores_order':1, 'uart_read_after_store_burst':1}
-# Cache profiles also run each directed program in perf mode at this latency: no backpressure, so a refill is
-# long and the timing is fixed. The counters must show the scenario the program names.
+MMIO_READS = {'mmio_bypasses_dcache':2, 'memory_pairs_with_alu':2, 'mmio_store_after_cacheable_stores_order':1, 'uart_read_after_store_burst':1}
+# Fixed refill latency and no backpressure make directed perf-mode scenarios observable in the counters.
 PERF_LATENCY = 50
 WITNESSES = {
     'store_miss_drains_under_load_hits': lambda c: c['dcache_hit_under_store_miss'] >= 4,
@@ -117,16 +116,17 @@ def perf_trace(output, end_pc):
     return '\n'.join(lines)
 
 
+FETCHED_CONFIGS = ('memory_core','early_load_core','cached_core','memory_core_m','early_load_core_m','cached_core_m')
+
+
 def build_fetched(directory=ROOT/'out/sail_fetched_differential/obj_dir', replace=None, config_name='memory_core', bench_defines=(), attribution=False):
-    """Build the fetched core with the program-mode driver; RTL mutants run without RTL assertions.
-    The top is trace_lockstep: the trace build drives the bench while the physical build (TRACE=0)
-    must match it every cycle."""
+    """Build trace/physical lockstep with the program driver; disable RTL assertions for RTL mutants."""
     config = json.loads((ROOT/f'config/{config_name}.json').read_text())
     make_header()
     flags = ['--Wall','--assert','--top-module','trace_lockstep','--prefix','Vcpu_top',
              *(f'-G{k}={v}' for k,v in config['parameters'].items()), ROOT/config['lint_config'], ROOT/'verif/core/perf_counters.vlt']
     if attribution:
-        if config_name != 'cached_core': raise ValueError('attribution requires cached_core')
+        if config_name not in ('cached_core', 'cached_core_m'): raise ValueError('attribution requires cached_core')
         flags.append(ROOT/'verif/core/perf_attribution.vlt')
         bench_defines = (*bench_defines, 'TB_ATTRIBUTION=1')
     if replace and replace[0].startswith('rtl/'): flags += ['-DSYNTHESIS','-Wno-UNUSEDSIGNAL','-Wno-UNUSEDPARAM']
@@ -252,7 +252,7 @@ def main():
     parser.add_argument('--sail', type=Path, default=SAIL)
     parser.add_argument('--spike', type=Path, default=ROOT/'../riscv-isa-sim/build/spike')
     parser.add_argument('--reference', choices=('sail','spike'), default='sail')
-    parser.add_argument('--config', default='memory_core', choices=('memory_core','early_load_core','cached_core'),
+    parser.add_argument('--config', default='memory_core', choices=FETCHED_CONFIGS,
                         help='fetched-core profile under config/')
     args = parser.parse_args()
     on_spike = args.reference == 'spike'
@@ -269,6 +269,8 @@ def main():
         if settings['sail_override']['platform']['instructions_per_tick'] <= settings.get('long_run',settings)['instruction_limit']+1:
             raise ValueError('Sail timer tick interval must exceed the run limit')
     config = json.loads((ROOT/f'config/{args.config}.json').read_text())
+    m = bool(config['parameters'].get('M_EXTENSION'))
+    if m and on_spike: raise ValueError('the Spike differential is rv32i only')
     versions = {}
     toolchain = json.loads((ROOT/'config/toolchain.lock').read_text())
     for name,command in [('verilator','verilator'),('riscv-gcc','riscv64-unknown-elf-gcc')]:
@@ -293,7 +295,9 @@ def main():
     out = ROOT/(('out/spike_fetched_differential' if on_spike else 'out/sail_fetched_differential')+suffix)/run_hash
     out.mkdir(parents=True,exist_ok=True)
     receipt = out/'receipt.json'; receipt.unlink(missing_ok=True)
-    if not on_spike: override = out/'override.json'; override.write_text(json.dumps(settings['sail_override'])+'\n')
+    if not on_spike:
+        sail_override = {**settings['sail_override'],**({'extensions':{'M':{'supported':True}}} if m else {})}
+        override = out/'override.json'; override.write_text(json.dumps(sail_override)+'\n')
     def run(command,log,failure=None):
         result = subprocess.run([str(c) for c in command],cwd=ROOT,text=True,stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT,timeout=600)
@@ -325,7 +329,7 @@ def main():
         run([sail,'--config',ROOT/'verif/arch/act4/sail.json','--config-override',override,
              '--trace-instr','--trace-reg','--trace-mem','--trace-exception','--trace-step',
              '--trace-output',trace,'--inst-limit',limit+1,elf],f'sail_{stem}.log')
-        expected = parse_sail_log(trace.read_text())
+        expected = parse_sail_log(trace.read_text(), m)
         if len(expected) != limit: raise ValueError('Sail trace is incomplete')
         end = next((n for n,e in enumerate(expected) if e['pc_before'] == end_pc),None)
         if end is None: raise ValueError('Sail did not reach program end')
@@ -333,7 +337,7 @@ def main():
             raise ValueError('Sail initialization sequence differs')
         return expected[:end+1], trace
     for seed,repeat,limit in runs:
-        image,boot,end_pc = program(seed, True, 0, repeat)
+        image,boot,end_pc = program(seed, True, 0, repeat, m)
         raw, elf = compile_image(seed, image)
         if on_spike:
             expected,trace = spike_reference(reference,settings,seed,repeat,out,run)
@@ -357,7 +361,7 @@ def main():
                                 **{f'{args.reference}_trace_sha256':digest(trace)},rtl_log_sha256=digest(out/log),
                                 bootstrap_events_per_reset=len(boot)))
             print(f'{label} differential fetched seed={seed} {mode}: PASS ({count} events)',flush=True)
-    # Directed data-cache programs (docs: Tasks 5 and 6 of the L1 cache plan); Sail only, every profile.
+    # Run directed cache programs against Sail for every profile.
     cached = bool(config['parameters'].get('DCACHE'))
     directed = {}
     perf_command = lambda path,count,end_pc: [path,1,count+1,'perf',f'+read_latency={PERF_LATENCY}',
@@ -411,8 +415,7 @@ def main():
         ('fence_i_keeps_line','rtl/frontend/fetch_unit.sv','        end else state_q <= EMPTY;',
          '        end else if (redirect_pc_i[31:5] != pc_q[31:5]) state_q <= EMPTY;'),
     ] + ([
-        # Early loads: skipping the older-store overlap check reads stale bytes; killing every in-flight load
-        # on recovery strands a surviving load whose queue entry is already issued.
+        # Detect stale early loads and recovery that strands an already-issued surviving load.
         ('early_ignores_overlap','rtl/memory/load_store_unit.sv','start_ready && forward_mask == 0;','start_ready;'),
         ('early_kills_survivor','rtl/memory/load_store_unit.sv',"(recover_i && 5'(slot - head) > 5'(recover_slot_i - head))",'recover_i'),
     ] if 'rtl/memory/load_store_unit.sv' in config['sources'] else []) + ([
@@ -423,23 +426,36 @@ def main():
         ('fence_i_skips_invalidate','rtl/system/head_system_controller.sv',
          'invalidate_q <= CLEAN && !rst_i && !cancel_i && clean_q == CLEAN_WAIT && clean_done_i;','invalidate_q <= 0;'),
     ] if config['parameters'].get('ICACHE') else []) + ([
-        # Store buffer, detected by the directed programs (Sail only): a clean that starts before buffered stores
-        # land misses the last one; a push into a full buffer is lost; MMIO overtakes buffered stores; same-byte
-        # entries resolve oldest first; the landing entry hides from forwarding while a load reads the old line.
+        # Detect store-buffer ordering, capacity and forwarding faults with directed Sail programs.
         ('fence_i_ignores_buffer','rtl/memory/load_store_unit.sv','dc_busy || !stores_drained','dc_busy'),
         ('push_ignores_full','rtl/memory/memory_transaction_path.sv','cs_ready && !store_buffer_full_i','cs_ready'),
         ('mmio_skips_buffer','rtl/memory/memory_transaction_path.sv','room && !store_buffer_pending_i','room'),
         ('sb_ages_reversed','rtl/memory/load_store_queue.sv',"candidate_age[k] = 6'(k);","candidate_age[k] = 6'(SB_N-1-k);"),
         ('sb_hidden_while_landing','rtl/memory/load_store_unit.sv','assign retired_valid = sb_valid;',
          "assign retired_valid = sb_valid & ~{3'd0, write_done_o};"),
-    ] if cached and not on_spike else [])):
+    ] if cached and not on_spike else []) + ([
+        # Detect RV32M routing, busy, opcode, recovery, misa and fetch-decode faults.
+        ('m_on_port0','rtl/backend/execution_backend.sv',"EARLY_LOADS && memory_op[lane] || muldiv_op[lane] ? 2'b10","EARLY_LOADS && memory_op[lane] ? 2'b10"),
+        ('m_ready_ignored','rtl/backend/execution_backend.sv','assign producer_ready[1] = alu1_ready && muldiv_ready;','assign producer_ready[1] = alu1_ready;'),
+        ('m_issue_any_op','rtl/backend/execution_backend.sv',"issue_payload[70:64] == 7'h33 && issue_payload[95:89] == 7'h01;","issue_payload[70:64] == 7'h33;"),
+        ('m_recover_by_head','rtl/backend/execution_backend.sv','.recover_slot_i(resolve_id_o[4:0]), .head_slot_i(head_id_o[4:0]),',
+         '.recover_slot_i(head_id_o[4:0]), .head_slot_i(head_id_o[4:0]),'),
+        ('misa_without_m','rtl/system/csr_unit.sv',"? 32'h00001000 : 32'd0;","? 32'd0 : 32'd0;"),
+        ('fetch_decode_without_m','rtl/core/cpu_top.sv','frontend_fault_decode #(.M_EXTENSION(M_EXTENSION)) decode (','frontend_fault_decode decode ('),
+    ] if m else []) + ([
+        # Lane 1 with early loads: an M take while a load completes, and M ahead of a completing load.
+        ('m_take_ignores_memory','rtl/backend/execution_backend.sv','.take_i(completion_accept_o[1] && !memory_complete && muldiv_valid),',
+         '.take_i(completion_accept_o[1] && muldiv_valid),'),
+        ('m_outranks_memory','rtl/backend/execution_backend.sv',
+         'memory_complete ? lsu_complete_id : muldiv_valid ? muldiv_id : alu1_id;\n  assign producer_event[1] = memory_complete ? lsu_event : muldiv_valid ? muldiv_event : alu1_event;',
+         'muldiv_valid ? muldiv_id : memory_complete ? lsu_complete_id : alu1_id;\n  assign producer_event[1] = muldiv_valid ? muldiv_event : memory_complete ? lsu_event : alu1_event;'),
+    ] if m and config['parameters'].get('EARLY_LOADS') else [])):
         text = (ROOT/file).read_text()
         if text.count(old) != 1: raise ValueError('RTL mutation no longer matches')
         directory = out/name; directory.mkdir(exist_ok=True)
         changed = directory/Path(file).name; changed.write_text(text.replace(old,new))
         mutant = build_fetched(directory/'obj_dir',(file,changed),config_name=args.config)[0]
-        # A mutant may also fail by hanging (watchdog) instead of diverging; both count as detected. It runs
-        # the seed-42 program, then, while it survives, every directed program in normal and perf mode.
+        # Accept divergence or watchdog detection; try seed 42, then directed programs in normal and perf modes.
         trials = [(name,[raw,42,len(expected),'normal'],expected,boot,None)]
         for program_name,(path,program_boot,program_expected,end_pc) in directed.items():
             trials += [(f'{name}_{program_name}',[path,42,len(program_expected),'normal'],program_expected,program_boot,None),
@@ -458,7 +474,7 @@ def main():
         print(f'{label} RTL mutation {name}: PASS (detected by {stem})',flush=True)
     if any(digest(ROOT/p) != h for p,h in inputs.items()): raise ValueError('inputs changed during differential run')
     receipt.write_text(json.dumps({**fingerprint,'schema':1,'profile':settings['profile'],'runs':results,
-        'core_binary_sha256':digest(binary),**({} if on_spike else {'sail_override':settings['sail_override']}),
+        'core_binary_sha256':digest(binary),**({} if on_spike else {'sail_override':sail_override}),
         'mutations_detected':mutations,'limitations':settings['limitations'],
         'two_wide_core_accepted':False},indent=2)+'\n')
     print(f'Receipt: {receipt.relative_to(ROOT)}')

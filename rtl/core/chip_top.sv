@@ -1,6 +1,5 @@
 `default_nettype none
-// physical top: cpu_top without trace state, the bench controls tied to always-ready, and only the
-// instruction and data memory ports plus fatal as pins. stores are admitted as soon as they are offered.
+// Physical core without trace state; exposes memory ports and fatal with store admission always ready.
 module chip_top (
   input  wire clk_i, rst_i,
   // instruction port
@@ -21,12 +20,11 @@ module chip_top (
 );
   wire admission_valid;
   wire [12:0] admission_id;
-  // the reset pin reaches the core through two flops: its input delay leaves the data paths, and an
-  // asynchronously driven pin settles before it fans out to the core
+  // Register external reset twice before it fans out to the core.
   logic [1:0] reset_q;
   always_ff @(posedge clk_i) reset_q <= {reset_q[0], rst_i};
 
-  cpu_top #(.FRONTEND_FAULTS(1), .TRAP_SERVICE(1), .MEMORY_SERVICE(1), .EARLY_LOADS(1), .DCACHE(1), .ICACHE(1), .TRACE(0)) core (
+  cpu_top #(.FRONTEND_FAULTS(1), .TRAP_SERVICE(1), .MEMORY_SERVICE(1), .EARLY_LOADS(1), .DCACHE(1), .ICACHE(1), .M_EXTENSION(1), .TRACE(0)) core (
     .clk_i, .rst_i(reset_q[1]), .enable_i(1'b1), .flush_i(1'b0), .drained_i(1'b0), .flush_pc_i(32'd0),
     .request_ready_i, .response_valid_i, .response_i,
     .data_request_ready_i, .data_response_valid_i, .data_response_i,

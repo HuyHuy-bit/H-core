@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""CoreMark on the fetched core: reference validation, store-overlap census and RTL CPI.
-
-CPI is reported for the whole program and for a kernel region: from the first core_bench_list call of
-iteration WARMUP (0-based) to stop_time, so it covers ITERATIONS - WARMUP iterations. Boot is everything
-before the region and tail is from stop_time to the terminal; the fixed timer gives no CoreMark score.
-
-The census bounds the partial-overlap merge (docs: lsq-roadmap): a load waits only when an
-older store still in flight covers some, not all, of its bytes. Every older store within the
-last ROB_N retired instructions is counted as in flight, so the census is an upper bound.
-"""
+"""Run CoreMark with reference validation, warm-region CPI and an upper-bound store-overlap census."""
 import hashlib
 import json
 from pathlib import Path
@@ -26,6 +17,12 @@ REVISION = '1f483d5b8316753a742cbf5590caf5bd0a4e4777'
 SOURCE = ROOT/'out/coremark_src/coremark'
 OUT = ROOT/'out/coremark'
 FLAGS = ['-O2', '-march=rv32i', '-mabi=ilp32']
+ARCHES = ('rv32i', 'rv32im')
+
+
+def compiler_flags(march='rv32i'):
+    if march not in ARCHES: raise ValueError(f'unsupported -march {march}')
+    return ['-O2', f'-march={march}', '-mabi=ilp32']
 ROB_N = 32
 PROFILES = ('early_load_core', 'cached_core')
 LATENCIES = (1, 10, 50)
@@ -50,7 +47,7 @@ def fetch():
     if head.stdout.strip() != REVISION: raise RuntimeError('CoreMark checkout is not the pinned revision')
 
 
-def build(iterations):
+def build(iterations, march='rv32i'):
     """Barebones ee_printf with its #error uart_send_char removed; the port supplies one."""
     OUT.mkdir(parents=True, exist_ok=True)
     text = (SOURCE/'barebones/ee_printf.c').read_text()
@@ -60,7 +57,8 @@ def build(iterations):
     elf = OUT/'coremark.elf'
     sources = ['sw/coremark/start.S', *(SOURCE/f'core_{n}.c' for n in ('list_join', 'main', 'matrix', 'state', 'util')),
                'sw/coremark/core_portme.c', OUT/'ee_printf.c']
-    subprocess.run(['riscv64-unknown-elf-gcc', *FLAGS, f'-DITERATIONS={iterations}', f'-DFLAGS_STR="{" ".join(FLAGS)}"',
+    flags = compiler_flags(march)
+    subprocess.run(['riscv64-unknown-elf-gcc', *flags, f'-DITERATIONS={iterations}', f'-DFLAGS_STR="{" ".join(flags)}"',
                     '-ffreestanding', '-nostdlib', '-nostartfiles', '-Wl,--no-relax,--build-id=none',
                     '-T', 'sw/link/platform.ld', '-Isw/coremark', f'-I{SOURCE}', *map(str, sources), '-lgcc',
                     '-o', str(elf)], cwd=ROOT, check=True)
@@ -94,10 +92,10 @@ def verify_snapshot(inputs):
             raise RuntimeError(f'measurement input changed during run: {name}')
 
 
-def run_manifest(profile, config, inputs, tools, image, iterations, warmup, program, latency):
+def run_manifest(profile, config, inputs, tools, image, iterations, warmup, program, latency, march='rv32i'):
     return dict(schema=RECEIPT_SCHEMA, profile=profile, parameters=config['parameters'],
                 inputs_sha256=inputs, tools=tools, image_sha256=digest(image),
-                coremark_revision=REVISION, flags=FLAGS, iterations=iterations, warmup=warmup,
+                coremark_revision=REVISION, flags=compiler_flags(march), iterations=iterations, warmup=warmup,
                 region=list(program['warm']), terminal=program['terminal'], rob_window=ROB_N,
                 read_latency=latency, write_latency=latency, seed=1, mode='perf')
 
@@ -180,16 +178,19 @@ def main():
     parser.add_argument('--warmup', type=int, default=1, help='iterations before the kernel region')
     parser.add_argument('--census-only', action='store_true')
     parser.add_argument('--out', type=Path, default=OUT, help='isolated output and receipt directory')
+    parser.add_argument('--march', choices=ARCHES, default='rv32i')
     args = parser.parse_args()
     if not 0 <= args.warmup < args.iterations: raise ValueError('warmup must leave at least one region iteration')
+    if args.march != 'rv32i' and args.out == parser.get_default('out'):
+        raise ValueError('--march other than rv32i needs its own --out')
     OUT = args.out.resolve()
     fetch()
     configs = {profile: json.loads((ROOT/f'config/{profile}.json').read_text()) for profile in PROFILES}
     inputs = snapshot(sorted({p for profile, config in configs.items() for p in input_files(profile, config)}))
     tools = tool_versions()
-    image, symbols = build(args.iterations)
+    image, symbols = build(args.iterations, args.march)
     image_sha256 = digest(image)
-    reference = Reference(image)
+    reference = Reference(image, m_extension='m' in args.march[4:])
     expected = []
     while not expected or expected[-1]['pc_before'] != symbols['coremark_done']:
         expected.append(reference.step())
@@ -206,7 +207,7 @@ def main():
     counts = census(expected)
     print(f'CoreMark x{args.iterations}: {len(expected)} instructions, validated; census (window {ROB_N}) {counts}', flush=True)
     receipt_path = OUT/'receipt.json'
-    receipt = dict(schema=RECEIPT_SCHEMA, status='partial', coremark_revision=REVISION, flags=FLAGS, iterations=args.iterations,
+    receipt = dict(schema=RECEIPT_SCHEMA, status='partial', coremark_revision=REVISION, flags=compiler_flags(args.march), iterations=args.iterations,
                    warmup=args.warmup, region=dict(start=['core_bench_list', 2*args.warmup + 1], end=['stop_time', 1]),
                    instructions=len(expected), rob_window=ROB_N, census=counts, results=[],
                    inputs_sha256=inputs, tools=tools, image_sha256=image_sha256,
@@ -215,7 +216,7 @@ def main():
                          'independent counter recount. Census counts are an upper bound on partial store overlaps.')
     previous = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
     manifests = [run_manifest(profile, config, {p: inputs[p] for p in input_files(profile, config)}, tools,
-                              image, args.iterations, args.warmup, program, latency)
+                              image, args.iterations, args.warmup, program, latency, args.march)
                  for profile, config in configs.items() for latency in LATENCIES]
     if args.census_only:
         receipt['claim'] = 'Reference-only CoreMark validation and store-overlap census; no RTL result is claimed.'

@@ -123,11 +123,25 @@ static void load_timing() {
     expect(o,0,"completion1_conflict",1); expect(o,0,"completion1_alu_wait",1);
     expect(o,0,"completion1_load_wait",0);
 }
+static void restriction_counters() {
+    Observer o;
+    auto f=frame(0); f.fetch_lanes=3; f.allocated={ins(0,16,3),ins(1,20)}; f.allocated[1].valid=false; o.sample(f);
+    f=frame(1,{0}); f.allocated[0]=ins(1,20); o.sample(f);
+    f=frame(2,{0,1}); f.rob_done=3; f.rob_solo=1; f.retired[0]=ins(0,16,3);
+    f.resolve_offer=f.resolve_grant=f.memory_irrevocable=f.mispredict=true; o.sample(f);
+    f=frame(3,{1}); f.head=1; f.recycle_state=1; o.sample(f);
+    f=frame(4,{1}); f.head=1; f.allocated[0]=ins(2,24); o.sample(f);
+    f=frame(5,{1,2}); f.head=1; o.sample(f);
+    expect(o,0,"pair_lost_load0",1); expect(o,0,"retire_lost_solo_head_load",1);
+    expect(o,0,"resolve_held_memory",1); expect(o,0,"resolve_held_mispredict",1);
+    expect(o,0,"recycle_events",1); expect(o,0,"recycle_window_cycles",2);
+}
+
 int main() {
     try {
         head_window(); branch_gap(false); branch_gap(true); wrong_path_branch();
-        identity_negatives(); forwarding(); load_timing();
-        std::cout<<"ATTRIBUTION TEST PASS: windows, recovery, wrong-path, generation, readiness, forwarding, load timing\n";
+        identity_negatives(); forwarding(); load_timing(); restriction_counters();
+        std::cout<<"ATTRIBUTION TEST PASS: windows, recovery, wrong-path, generation, readiness, forwarding, load timing, restrictions\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

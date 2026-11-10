@@ -80,7 +80,7 @@ public:
         unsigned n = 0;
         for (const auto& e : queue) {
             if (n == 2 || !e.done || bit(e.event, TRAP_OFFSET) || (e.cfi && !e.resolved)) break;
-            if (n && (queue.front().solo || e.solo)) break;
+            if (n && e.solo) break;
             ++n;
         }
         return n;

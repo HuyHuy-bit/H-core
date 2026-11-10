@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "profile": "rv32m_muldiv_producer",
+  "sources": [
+    "rtl/generated/commit_event_pkg.sv",
+    "rtl/execute/muldiv_unit.sv"
+  ],
+  "seeds": [
+    1,
+    42,
+    20261108
+  ],
+  "scope": "Standalone RV32M producer: operation register, radix-2 divider and one-entry result holder. No decoder, issue, PRF, ROB or core integration.",
+  "contract": "launch_i only when ready_o, with an OP funct7=1 instruction and its sources. MUL/MULH/MULHSU/MULHU results are held two edges after launch; DIV/DIVU/REM/REMU keep the operation register for 34 edges and block every launch meanwhile. valid_o stays until take_i. Results follow RV32M, including divide by zero and signed overflow.",
+  "recovery": "flush_i kills all work. recover_i kills work whose ROB slot is younger than recover_slot_i relative to head_slot_i, including a same-cycle launch and the holder (valid_o drops in that cycle). Older work continues.",
+  "lint_config": "config/muldiv_unit.vlt"
+}

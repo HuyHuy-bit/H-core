@@ -23,8 +23,8 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def collect(image, terminal, warm=None, limit=5_000_000, log_address=None):
-    reference = Reference(image)
+def collect(image, terminal, warm=None, limit=5_000_000, log_address=None, m_extension=False):
+    reference = Reference(image, m_extension=m_extension)
     branches, marks, seen = [], [None, None], [0, 0]
     plus4 = 0
     for order in range(limit):
@@ -111,10 +111,14 @@ def load_coremark(directory, warmup):
     if seed + 4 > len(image):
         raise ValueError('CoreMark iteration count is outside the image')
     iterations = int.from_bytes(image[seed:seed+4], 'little', signed=True)
+    attributes = subprocess.check_output(['riscv64-unknown-elf-readelf', '-A', str(elf)], text=True)
+    arch = next(l.split('"')[1] for l in attributes.splitlines() if 'Tag_RISCV_arch' in l)
+    if arch not in ('rv32i2p0', 'rv32i2p0_m2p0'): raise ValueError(f'unsupported CoreMark arch {arch}')
     if not 0 <= warmup < iterations:
         raise ValueError('warmup must leave at least one CoreMark iteration')
     return dict(image=image, terminal=symbols['coremark_done'],
-                warm=(symbols['core_bench_list'], 2*warmup+1, symbols['stop_time'], 1)), symbols, iterations
+                warm=(symbols['core_bench_list'], 2*warmup+1, symbols['stop_time'], 1),
+                m_extension=arch.endswith('_m2p0')), symbols, iterations
 
 
 def main():

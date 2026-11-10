@@ -98,13 +98,13 @@ class CoreMarkReceiptTests(unittest.TestCase):
             class Reference:
                 memory = b'Correct operation validated\0'
 
-                def __init__(self, image):
+                def __init__(self, image, m_extension):
                     pass
 
                 def step(self):
                     return {'pc_before': 48}
 
-            def build(iterations):
+            def build(iterations, march):
                 (output/'coremark.bin').write_bytes(b'image')
                 return b'image', symbols
 

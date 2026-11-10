@@ -4,6 +4,11 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#ifndef TB_M_EXTENSION
+#define TB_M_EXTENSION 0
+#endif
+// misa reports M (bit 12) when the core is built with M_EXTENSION.
+constexpr uint32_t misa_m(unsigned address) { return TB_M_EXTENSION && address == 0x301 ? 0x1000U : 0U; }
 using Effect = std::array<uint32_t, 7>;
 struct Reply {
     bool legal=false, read=false, trap=false;
@@ -20,7 +25,7 @@ inline uint32_t csr(unsigned address,unsigned kind=2,unsigned source=0,unsigned 
 struct CsrModel {
     std::map<unsigned,uint32_t> state;
     CsrModel() { reset_state(); }
-    void reset_state() { state.clear(); for (const auto& c : CSR_SPEC) state[c.address]=c.reset; }
+    void reset_state() { state.clear(); for (const auto& c : CSR_SPEC) state[c.address]=c.reset | misa_m(c.address); }
     const Spec* spec(unsigned address) const {
         for (const auto& c : CSR_SPEC) if (c.address == address) return &c;
         return nullptr;
@@ -63,7 +68,7 @@ struct CsrModel {
         else if (kind==2 || kind==6) data=old | operand;
         else data=old & ~operand;
         data=(data & c->write_mask) | (old & ~c->write_mask);
-        data=(data & ~c->fixed_mask) | c->fixed_value;
+        data=(data & ~c->fixed_mask) | c->fixed_value | misa_m(c->address);
         out.value=out.read ? old : 0;
         out.next=in.pc+4;
         out.effects[0]=effect(c->address,write ? data : old,write ? c->write_mask : 0,1);

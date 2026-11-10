@@ -1,7 +1,6 @@
 `default_nettype none
 // head-serialized machine-mode csr bank: prepares one csr/mret/wfi/fence/trap result and applies it on accept.
-module csr_unit (
-  // inputs
+module csr_unit #(parameter bit M_EXTENSION = 0) (
   input  wire clk_i, rst_i, cancel_i,
   input  wire [1:0] retire_count_i,
   input  wire request_valid_i,
@@ -9,8 +8,6 @@ module csr_unit (
   input  wire trap_i,
   input  wire [31:0] cause_i, trap_value_i,
   input  wire response_ready_i,
-
-  // outputs
   output wire request_ready_o,
   output wire response_valid_o,
   output wire accept_o, retired_o, trap_accept_o,
@@ -33,6 +30,10 @@ module csr_unit (
   wire prepare = request_valid_i && request_ready_o;
   wire commit_state = accept_o && legal_q;
   wire [1:0] increment = retired_o ? 2'd1 : retire_count_i;
+  // misa reports M only when the extension is built in.
+  function automatic logic [31:0] misa_m(input int index);
+    return M_EXTENSION && index == CSR_INDEX_MISA ? 32'h00001000 : 32'd0;
+  endfunction
 
   decoder decode (.instruction_i, .decoded_o(decoded));
   assign request_ready_o = !rst_i && !cancel_i && !pending_q;
@@ -88,7 +89,7 @@ module csr_unit (
       default: new_value = old_value;
     endcase
     new_value = (new_value & CSR_WRITE_MASKS[query_index]) | (old_value & ~CSR_WRITE_MASKS[query_index]);
-    new_value = (new_value & ~CSR_FIXED_MASKS[query_index]) | CSR_FIXED_VALUES[query_index];
+    new_value = (new_value & ~CSR_FIXED_MASKS[query_index]) | CSR_FIXED_VALUES[query_index] | misa_m(query_index);
     next_pc = pc_i;
     proposal = '0;
     if (trap_i) begin
@@ -123,12 +124,11 @@ module csr_unit (
     end
   end
 
-  // result capture and committed csr updates
-  // head preparation freezes the result; acceptance alone applies explicit effects.
+  // Head preparation freezes the result; acceptance alone applies explicit CSR effects.
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       pending_q <= 0;
-      for (int i = 0; i < CSR_COUNT; i++) csr_q[i] <= CSR_RESETS[i];
+      for (int i = 0; i < CSR_COUNT; i++) csr_q[i] <= CSR_RESETS[i] | misa_m(i);
     end else begin
       if (cancel_i || accept_o) pending_q <= 0;
       if (prepare) begin
@@ -154,8 +154,6 @@ module csr_unit (
       end
     end
   end
-
-  // checks
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin

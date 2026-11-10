@@ -1,12 +1,8 @@
 `default_nettype none
-// simulation only: the trace build and the physical build (TRACE=0) run in lockstep on the same inputs.
-// outputs come from the trace build; every cycle the physical build must drive the same valids and
-// handshakes, the same payload under each valid, and the same event fields the hardware reads. generated from cpu_top's port
-// list; `.*` makes a port change fail the build.
+// Drive the bench from TRACE=1 and check TRACE=0 handshakes, valid payloads and hardware-visible events each cycle.
 module trace_lockstep #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE = 1, parameter bit MEMORY_SERVICE = 0,
                         parameter bit EARLY_LOADS = 0, parameter bit TAGE = 1, parameter bit DCACHE = 0,
-                        parameter bit ICACHE = 0) (
-  // inputs
+                        parameter bit ICACHE = 0, parameter bit M_EXTENSION = 0) (
   input  wire clk_i, rst_i, enable_i, flush_i, drained_i,
   input  wire [31:0] flush_pc_i,
   input  wire request_ready_i,
@@ -20,8 +16,6 @@ module trace_lockstep #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SE
   input  wire [1:0] execution_ready_i, completion_enable_i, retire_ready_i,
   input  wire resolve_grant_i,
   input  wire trap_ready_i,
-
-  // outputs
   output wire request_valid_o,
   output memory_protocol_pkg::mem_request_t request_o,
   output wire response_ready_o,
@@ -57,7 +51,7 @@ module trace_lockstep #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SE
   import commit_event_pkg::*;
   // the comparison deliberately reads only the hardware-visible bits of each event
   /* verilator lint_off UNUSEDSIGNAL */
-  cpu_top #(.FRONTEND_FAULTS(FRONTEND_FAULTS), .TRAP_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .EARLY_LOADS(EARLY_LOADS), .TAGE(TAGE), .DCACHE(DCACHE), .ICACHE(ICACHE), .TRACE(1)) full (.*);
+  cpu_top #(.FRONTEND_FAULTS(FRONTEND_FAULTS), .TRAP_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .EARLY_LOADS(EARLY_LOADS), .TAGE(TAGE), .DCACHE(DCACHE), .ICACHE(ICACHE), .M_EXTENSION(M_EXTENSION), .TRACE(1)) full (.*);
 
   wire lean_request_valid_o;
   memory_protocol_pkg::mem_request_t lean_request_o;
@@ -90,7 +84,7 @@ module trace_lockstep #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SE
   wire [5:0] lean_occupancy_o;
   wire lean_system_prepare_o, lean_system_busy_o;
   wire lean_identity_drain_o, lean_fatal_o;
-  cpu_top #(.FRONTEND_FAULTS(FRONTEND_FAULTS), .TRAP_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .EARLY_LOADS(EARLY_LOADS), .TAGE(TAGE), .DCACHE(DCACHE), .ICACHE(ICACHE), .TRACE(0)) lean (.clk_i, .rst_i, .enable_i, .flush_i, .drained_i, .flush_pc_i, .request_ready_i, .response_valid_i, .response_i, .data_request_ready_i, .data_response_valid_i, .data_response_i, .memory_issue_allowed_i, .admit_valid_i, .admit_id_i, .execution_ready_i, .completion_enable_i, .retire_ready_i, .resolve_grant_i, .trap_ready_i,
+  cpu_top #(.FRONTEND_FAULTS(FRONTEND_FAULTS), .TRAP_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .EARLY_LOADS(EARLY_LOADS), .TAGE(TAGE), .DCACHE(DCACHE), .ICACHE(ICACHE), .M_EXTENSION(M_EXTENSION), .TRACE(0)) lean (.clk_i, .rst_i, .enable_i, .flush_i, .drained_i, .flush_pc_i, .request_ready_i, .response_valid_i, .response_i, .data_request_ready_i, .data_response_valid_i, .data_response_i, .memory_issue_allowed_i, .admit_valid_i, .admit_id_i, .execution_ready_i, .completion_enable_i, .retire_ready_i, .resolve_grant_i, .trap_ready_i,
     .request_valid_o(lean_request_valid_o),
     .request_o(lean_request_o),
     .response_ready_o(lean_response_ready_o),

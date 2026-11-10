@@ -1,10 +1,7 @@
 `default_nettype none
-// rv32i, zicsr and zifencei decode; illegal instructions clear decoded register fields.
-module decoder (
-  // inputs
+// rv32i, zicsr and zifencei decode, plus rv32m when M_EXTENSION; illegal instructions clear decoded register fields.
+module decoder #(parameter bit M_EXTENSION = 0) (
   input  wire [31:0] instruction_i,
-
-  // outputs
   output core_pkg::decoded_t decoded_o
 );
   import core_pkg::*;
@@ -52,6 +49,7 @@ module decoder (
         decoded_o.rs2 = instruction_i[24:20];
         decoded_o.rd = instruction_i[11:7];
         if (funct7 == 0 || (funct7 == 7'h20 && funct3 inside {3'd0, 3'd5})) decoded_o.op = OP_ALU;
+        if (M_EXTENSION && funct7 == 7'h01) decoded_o.op = OP_MULDIV;
       end
       7'h63, 7'h23: begin
         decoded_o.rs1 = instruction_i[19:15];

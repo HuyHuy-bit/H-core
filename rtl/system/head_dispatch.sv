@@ -1,7 +1,6 @@
 `default_nettype none
 // dispatch gate for serialized ops: holds the one system (or head-path memory) descriptor until it retires.
 module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
-  // inputs
   input  wire clk_i, rst_i, flush_i, drained_i,
   input  wire [1:0] valid_i, serial_i,
   input  wire cfi0_i, memory_i,
@@ -16,8 +15,6 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
   input  wire [4:0] recover_slot_i,
   input  wire retire_accept_i,
   input  wire [12:0] retire_id_i,
-
-  // outputs
   output wire [1:0] dispatch_valid_o, dispatch_solo_o,
   output wire [1:0] queue_dispatch_o,
   output wire busy_o, owner_valid_o, killed_o,
@@ -35,17 +32,15 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
   wire younger = 5'(id_q[4:0] - head_id_i[4:0]) > 5'(recover_slot_i - head_id_i[4:0]);
   wire kill = recover_i && younger;
 
-  // dispatch admission
-  // when memory descriptors are not held here, loads/stores dispatch alone into the issue queue.
+  // With HOLD_MEMORY=0, memory descriptors use the issue queue.
   wire capture = allocate_accept_i[0] && serial_i[0] && (HOLD_MEMORY || !memory_i);
   wire release_owner = retire_accept_i && retire_id_i == id_q;
 
-  // a lane-one serialized operation is deferred. a held system descriptor blocks younger dispatch;
-  // a held load/store lets younger non-serial work dispatch behind it (it still retires alone at the head).
+  // Defer serial lane 1; held systems block dispatch, while lane-0 memory may admit younger non-serial work.
   wire open = !valid_q || memory_q;
   assign dispatch_valid_o[0] = valid_i[0] && open && !(valid_q && serial_i[0]) && !blocked;
   assign dispatch_valid_o[1] = dispatch_valid_o[0] && valid_i[1]
-      && !cfi0_i && !serial_i[0] && !serial_i[1];
+      && !cfi0_i && (!serial_i[0] || (!HOLD_MEMORY && memory_i)) && !serial_i[1];
   assign dispatch_solo_o = dispatch_valid_o & serial_i;
   assign queue_dispatch_o = allocate_accept_i & ~serial_i & {2{!blocked && open}};
   assign busy_o = valid_q;
@@ -72,8 +67,6 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
       memory_q <= memory_i;
     end
   end
-
-  // checks
 `ifndef SYNTHESIS
   wire load_op = instruction_i[6:0] == 7'h03
       && instruction_i[14:12] inside {3'd0, 3'd1, 3'd2, 3'd4, 3'd5};

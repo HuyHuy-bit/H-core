@@ -1,8 +1,7 @@
 `default_nettype none
 // execution backend: decode, issue queue, alu/branch producers, head system/memory service and early loads.
 module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMORY_SERVICE = 0, parameter bit DCACHE = 0,
-  parameter bit EARLY_LOADS = 0, parameter bit TRACE = 1, parameter int CHECKPOINT_BITS = 12) (
-  // inputs
+  parameter bit EARLY_LOADS = 0, parameter bit TRACE = 1, parameter int CHECKPOINT_BITS = 12, parameter bit M_EXTENSION = 0) (
   input  wire clk_i, rst_i, flush_i, drained_i,
   input  wire [1:0] valid_i,
   input  wire [63:0] instruction_i, pc_i, predicted_pc_i,
@@ -19,8 +18,6 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   input  wire data_request_ready_i,
   input  wire data_response_valid_i,
   input  memory_protocol_pkg::mem_response_t data_response_i,
-
-  // outputs
   output wire [1:0] supported_o, allocate_accept_o,
   output wire [25:0] allocate_id_o,
   output wire [CHECKPOINT_BITS-1:0] redirect_checkpoint_o,
@@ -64,7 +61,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   import core_pkg::*;
   decoded_t [1:0] decoded;
   wire [9:0] rs1, rs2, rd;
-  wire [1:0] cfi, selected, producer_ready, system_op, memory_op, serial_op, admitted, dispatch_solo;
+  wire [1:0] cfi, selected, producer_ready, system_op, memory_op, serial_op, admitted, dispatch_solo, muldiv_op;
   wire [5:0] rename_source, rename_source2, unused_rename_source, unused_rename_source2;
   wire [1:0] read_ready, unused_read_ready;
   wire head_valid, head_read, serial_offer, serial_accept, illegal_offer, illegal_accept, backend_trap_ready;
@@ -100,13 +97,18 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   wire [63:0] executable_instruction;
   commit_event_pkg::commit_event_t [1:0] producer_event;
   wire alu1_valid, lsu_issue, lsu_complete, lsu_allocate_ready, lsu_head_memory;
-  wire [12:0] alu1_id, lsu_complete_id;
-  commit_event_pkg::commit_event_t alu1_event, lsu_event;
-  // issue port 1 carries both alu work and load/store address generation.
-  assign lsu_issue = EARLY_LOADS && issue_o[1] && issue_payload[70:64] inside {7'h03, 7'h23};
+  wire alu1_ready, memory_issue, memory_complete, muldiv_issue, muldiv_valid, muldiv_ready;
+  wire [12:0] alu1_id, lsu_complete_id, muldiv_id;
+  commit_event_pkg::commit_event_t alu1_event, lsu_event, muldiv_event;
+  // lsu_issue/lsu_complete include memory and RV32M work that bypasses alu1 on port 1.
+  assign memory_issue = EARLY_LOADS && issue_o[1] && issue_payload[70:64] inside {7'h03, 7'h23};
+  assign muldiv_issue = M_EXTENSION && issue_o[1] && issue_payload[70:64] == 7'h33 && issue_payload[95:89] == 7'h01;
+  assign lsu_issue = memory_issue || muldiv_issue;
+  assign lsu_complete = memory_complete || muldiv_valid;
   assign completion_valid_o[1] = alu1_valid || lsu_complete;
-  assign completion_id_o[25:13] = lsu_complete ? lsu_complete_id : alu1_id;
-  assign producer_event[1] = lsu_complete ? lsu_event : alu1_event;
+  assign completion_id_o[25:13] = memory_complete ? lsu_complete_id : muldiv_valid ? muldiv_id : alu1_id;
+  assign producer_event[1] = memory_complete ? lsu_event : muldiv_valid ? muldiv_event : alu1_event;
+  assign producer_ready[1] = alu1_ready && muldiv_ready;
   logic [31:0] fault_q;
   // the rob keeps a 4-bit cause and takes pc from its own entry; instruction and pc here feed the trace only.
   logic [31:0] fault_instruction_q [32], fault_pc_q [32], fault_value_q [32];
@@ -123,21 +125,21 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   for (genvar lane = 0; lane < 2; lane++) begin : lanes
     assign executable_instruction[lane*32 +: 32] = frontend_fault_i[lane] ? 32'h00000013 : instruction_i[lane*32 +: 32];
     assign payload[lane*64 +: 64] = {frontend_fault_i[lane] ? 32'd0 : pc_i[lane*32 +: 32], executable_instruction[lane*32 +: 32]};
-    decoder decode (.instruction_i(executable_instruction[lane*32 +: 32]), .decoded_o(decoded[lane]));
+    decoder #(.M_EXTENSION(M_EXTENSION)) decode (.instruction_i(executable_instruction[lane*32 +: 32]), .decoded_o(decoded[lane]));
     assign system_op[lane] = SYSTEM_SERVICE && !frontend_fault_i[lane] && (decoded[lane].op inside {OP_CSR, OP_MRET, OP_WFI}
       || (MEMORY_SERVICE && decoded[lane].op inside {OP_FENCE, OP_FENCE_I}));
     assign memory_op[lane] = MEMORY_SERVICE && !frontend_fault_i[lane] && decoded[lane].op inside {OP_LOAD, OP_STORE};
     assign cfi[lane] = decoded[lane].op inside {OP_BRANCH, OP_JAL, OP_JALR};
-    assign supported_o[lane] = frontend_fault_i[lane] || ((cfi[lane] || serial_op[lane] || decoded[lane].op inside {OP_ALU, OP_LUI, OP_AUIPC})
+    assign muldiv_op[lane] = M_EXTENSION && !frontend_fault_i[lane] && decoded[lane].op == OP_MULDIV;
+    assign supported_o[lane] = frontend_fault_i[lane] || ((cfi[lane] || serial_op[lane] || muldiv_op[lane] || decoded[lane].op inside {OP_ALU, OP_LUI, OP_AUIPC})
       && pc_i[lane*32 +: 2] == 0);
     assign rs1[lane*5 +: 5] = decoded[lane].rs1;
     assign rs2[lane*5 +: 5] = decoded[lane].rs2;
     assign rd[lane*5 +: 5] = decoded[lane].rd;
-    assign eligible[lane*2 +: 2] = cfi[lane] ? 2'b01 : EARLY_LOADS && memory_op[lane] ? 2'b10 : 2'b11;
+    assign eligible[lane*2 +: 2] = cfi[lane] ? 2'b01 : EARLY_LOADS && memory_op[lane] || muldiv_op[lane] ? 2'b10 : 2'b11;
   end
 
-  // prediction and fault metadata
-  // per-slot side tables: frontend-fault metadata and the prediction each branch was fetched with.
+  // Per-slot tables retain frontend faults and each branch's fetch-time prediction.
   always_ff @(posedge clk_i) begin
     for (int lane = 0; lane < 2; lane++) begin
       automatic logic [4:0] slot = allocate_id_o[lane*13 +: 5];
@@ -160,8 +162,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     end
   end
 
-  // frontend fault completion
-  // fault tokens carry saved metadata to the rob without a result.
+  // Fault tokens complete in the ROB with saved metadata and no register result.
   always_comb begin
     completion_event_o = producer_event;
     for (int lane = 0; lane < 2; lane++) begin
@@ -180,8 +181,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     end
   end
 
-  // port zero execution and branch resolution
-  // port 0: branches, jumps and alu ops; the only port that resolves predictions.
+  // Port 0 executes ALU and control-flow work and alone resolves predictions.
   control_flow_pipeline producer0 (
     .clk_i, .rst_i, .flush_i(producer_flush), .launch_i(issue_o[0]), .ready_o(producer_ready[0]), .busy_o(producer_busy_o[0]),
     .id_i(issue_id_o[12:0]), .instruction_i(issue_payload[31:0]), .pc_i(issue_payload[63:32]),
@@ -192,15 +192,29 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     .mispredict_o(resolve_mispredict_o), .next_pc_o(resolve_pc_o), .resolve_take_i(resolve_accept_o)
   );
 
-  // port one alu execution
-  // only port zero resolves; cancel a younger held port-one result.
+  // Cancel younger held port-1 results when port 0 resolves a misprediction.
   alu_pipeline producer1 (
-    .clk_i, .rst_i, .flush_i(producer_flush || cancel_alu1), .launch_i(issue_o[1] && !lsu_issue), .ready_o(producer_ready[1]),
+    .clk_i, .rst_i, .flush_i(producer_flush || cancel_alu1), .launch_i(issue_o[1] && !lsu_issue), .ready_o(alu1_ready),
     .id_i(issue_id_o[25:13]), .instruction_i(issue_payload[95:64]), .pc_i(issue_payload[127:96]),
     .source1_i(read_data[95:64]), .source2_i(read_data[127:96]),
     .valid_o(alu1_valid), .id_o(alu1_id), .event_o(alu1_event),
     .take_i(completion_accept_o[1] && !lsu_complete)
   );
+
+  // port one rv32m execution; it cancels its own younger work like alu1's held result.
+  if (M_EXTENSION) begin : muldiv
+    muldiv_unit producer (
+      .clk_i, .rst_i, .flush_i(producer_flush), .recover_i(redirect_o),
+      .recover_slot_i(resolve_id_o[4:0]), .head_slot_i(head_id_o[4:0]),
+      .launch_i(muldiv_issue), .id_i(issue_id_o[25:13]), .instruction_i(issue_payload[95:64]), .pc_i(issue_payload[96 +: 32]),
+      .source1_i(read_data[95:64]), .source2_i(read_data[127:96]),
+      .take_i(completion_accept_o[1] && !memory_complete && muldiv_valid),
+      .ready_o(muldiv_ready), .valid_o(muldiv_valid), .id_o(muldiv_id), .event_o(muldiv_event)
+    );
+  end else begin : no_muldiv
+    assign {muldiv_ready, muldiv_valid, muldiv_id} = {1'b1, 14'd0};
+    assign muldiv_event = '0;
+  end
 
   if (SYSTEM_SERVICE) begin : systems
     wire descriptor_busy, killed, owner_valid, owner_memory, system_offer, system_trap_valid;
@@ -246,7 +260,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     );
 
     // system instructions and trap service
-    head_system_controller #(.CLEAN(DCACHE)) head (
+    head_system_controller #(.CLEAN(DCACHE), .M_EXTENSION(M_EXTENSION)) head (
       .clk_i, .rst_i, .cancel_i(flush_i || cancel_system_i), .retire_accept_i(retire_accept_o),
       .head_valid_i(head_valid), .head_id_i(head_id_o), .head_pc_i(head_pc),
       .system_valid_i(owner_valid && !owner_memory), .system_id_i(system_id), .instruction_i(system_instruction),
@@ -297,10 +311,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
       assign memory_busy_o = head_busy || lsu_busy;
       assign memory_fatal_o = head_fatal || lsu_fatal;
 
-      // committed-store stream
-      // memory_committed_o stays high while the engine owns the store, so the stream pulses on its first cycle only.
-      // With the cache it is the store buffer's head as it lands, in retirement order: a writeback it caused leaves
-      // before, without its bytes.
+      // Emit stores once in retirement order; cached stores follow any victim writeback.
       always_ff @(posedge clk_i) begin
         if (rst_i) committed_busy_q <= 0;
         else committed_busy_q <= memory_committed_o;
@@ -322,7 +333,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
           .allocate_ready_o(lsu_allocate_ready), .allocate_i(allocate_accept_o), .allocate_id_i(allocate_id_o),
           .allocate_instruction_i(instruction_i[31:0]), .allocate_pc_i(pc_i[31:0]),
           .allocate_sources_i({rename_source2, rename_source[5:0]}),
-          .issue_i(lsu_issue), .issue_id_i(issue_id_o[25:13]), .issue_instruction_i(issue_payload[95:64]),
+          .issue_i(memory_issue), .issue_id_i(issue_id_o[25:13]), .issue_instruction_i(issue_payload[95:64]),
           .issue_pc_i(issue_payload[127:96]), .source1_i(read_data[95:64]), .source2_i(read_data[127:96]),
           .retire_i(retire_accept_o[0]), .clean_i(clean_request), .clean_done_o(clean_done),
           .store_buffer_full_o(store_buffer_full), .store_buffer_pending_o(store_buffer_pending),
@@ -332,8 +343,8 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
           .head_sources_o(lsu_head_sources), .issue_allowed_i(memory_issue_allowed_i),
           .committed_valid_i(head_committed), .committed_address_i(head_committed_address),
           .committed_data_i(head_committed_data), .committed_mask_i(head_committed_mask),
-          .complete_valid_o(lsu_complete), .complete_id_o(lsu_complete_id), .complete_event_o(lsu_event),
-          .complete_take_i(completion_accept_o[1] && lsu_complete), .busy_o(lsu_busy), .fatal_o(lsu_fatal),
+          .complete_valid_o(memory_complete), .complete_id_o(lsu_complete_id), .complete_event_o(lsu_event),
+          .complete_take_i(completion_accept_o[1] && memory_complete), .busy_o(lsu_busy), .fatal_o(lsu_fatal),
           .head_request_valid_i(head_request_valid), .head_request_ready_o(head_request_ready),
           .head_request_i(head_request), .head_response_valid_o(head_response_valid),
           .head_response_ready_i(head_response_ready),
@@ -357,8 +368,6 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
       assign {lsu_head_instruction, lsu_head_sources} = 0;
     end
     assign backend_trap_ready = system_trap_valid_o && trap_ready_i;
-
-    // checks
 `ifndef SYNTHESIS
     always_ff @(posedge clk_i) if (!rst_i) begin
       assert (!(system_busy_o && redirect_o)) else $fatal(1, "CF_SYSTEM_RECOVERY");
@@ -395,10 +404,9 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
       ^ ^memory_serial_event;
   end
 
-  // disabled-service defaults
-  // without early loads, port one completes only alu results.
+  // Disable memory completions when early-load service is absent.
   if (!(SYSTEM_SERVICE && MEMORY_SERVICE && EARLY_LOADS)) begin : no_early_loads
-    assign {lsu_complete, lsu_complete_id, lsu_head_memory} = 0;
+    assign {memory_complete, lsu_complete_id, lsu_head_memory} = 0;
     assign lsu_event = '0;
     assign lsu_allocate_ready = 1;
   end
@@ -453,8 +461,6 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     .checkpoint_accept_o(), .checkpoint_id_o(allocate_checkpoint), .checkpoint_valid_o, .checkpoint_released_o(),
     .issue_checkpoint_o(issue_checkpoint), .resolve_checkpoint_o(resolve_checkpoint)
   );
-
-  // checks
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin

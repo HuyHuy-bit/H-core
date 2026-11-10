@@ -19,9 +19,9 @@ def require(condition, message):
     if not condition: raise SailLogError(message)
 
 
-def sources(ins):
+def sources(ins, m=False):
     op, f3, f7 = ins & 127, (ins >> 12) & 7, ins >> 25
-    if op == 0x33 and not (f7 == 0 or (f7 == 32 and f3 in (0,5))): return 0,0
+    if op == 0x33 and not (f7 == 0 or (f7 == 32 and f3 in (0,5)) or (m and f7 == 1)): return 0,0
     if op == 0x13 and ((f3 == 1 and f7 != 0) or (f3 == 5 and f7 not in (0,32))): return 0,0
     if op == 0x03 and f3 not in (0,1,2,4,5): return 0,0
     if op == 0x23 and f3 not in (0,1,2): return 0,0
@@ -55,15 +55,16 @@ def frames(trace):
     return result
 
 
-def parse_sail_log(trace):
+def parse_sail_log(trace, m=False):
     stream = frames(trace)
     regs = [None]*32; regs[0] = 0
     state = {addr:int(c['reset'],0) for addr,c in CSRS.items()}
+    if m: state[0x301] |= 1 << 12  # misa reports M
     state[0x300] = state[0x305] = 0
     events = []
     for frame, successor in zip(stream, stream[1:]):
         ins = frame['ins']; op = ins & 127; f3 = (ins >> 12) & 7
-        a,b = sources(ins)
+        a,b = sources(ins, m)
         require(regs[a] is not None and regs[b] is not None, 'uninitialized source in Sail program')
         event = dict(valid=1, order=frame['order'], instruction=ins, privilege=3,
                      pc_before=frame['pc'], pc_after=successor['pc'], rs1_addr=a, rs1_value=regs[a],

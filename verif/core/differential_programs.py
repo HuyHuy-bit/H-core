@@ -5,8 +5,8 @@ import struct
 from verif.core.programs import i, r, store, branch, jal, csr, constant
 
 
-def program(seed, self_modifying=False, base=0, repeat=1):
-    """Build one image; base relocates every BRAM address so Spike can run it above its debug module."""
+def program(seed, self_modifying=False, base=0, repeat=1, m=False):
+    """Build a relocatable fetched-core image with optional RV32M operations."""
     boot = [*constant(31,base+0x100), csr(0,31,0x305,1), *constant(31,0x1800), csr(0,31,0x300,1)]
     boot += [jal(0,0x400-4*len(boot))]
     words = [i(reg,0,reg*13-512) for reg in range(1,32)]
@@ -53,12 +53,21 @@ def program(seed, self_modifying=False, base=0, repeat=1):
             words += constant(28,target)+constant(27,value)+[store(28,27,offset,size), 0x100f, i(12,0,0x111)]
     # Random operands must not hold code addresses, so a relocated reference computes the same data.
     words += constant(28,base+0x8000)+[i(1,0,0x123),i(7,0,-0x77)]
+    if m:
+        # Exercise RV32M edge operands, dependent memory/branch work and wrong-path operations.
+        words += [i(1,0,-1), i(2,0,1)]+constant(13,0x80000000)
+        for f3 in range(8):
+            words += [r(14,1,2,f3,1), r(15,2,0,f3,1), r(16,13,1,f3,1), r(17,15,15,f3,1)]
+        words += [r(18,27,2,4,1), store(28,18,32,2), i(19,28,32,2,3), branch(18,0,12,1), r(20,18,18,0,1), r(21,18,1,5,1)]
+        words += [i(1,0,0x123)]
     rng = random.Random(seed)
     if repeat > 1: words += [i(26,0,repeat)]; top = len(words)
     for _ in range(600):
         rd,a,b = (rng.randrange(1,26),rng.randrange(26),rng.randrange(26))
-        choice = rng.randrange(3)
-        if choice == 0:
+        choice = rng.randrange(4 if m else 3)
+        if choice == 3:
+            words += [r(rd,a,b,rng.randrange(8),1)]
+        elif choice == 0:
             f3 = rng.randrange(8)
             words += [r(rd,a,b,f3,32 if f3 in (0,5) and rng.randrange(2) else 0)]
         elif choice == 1:

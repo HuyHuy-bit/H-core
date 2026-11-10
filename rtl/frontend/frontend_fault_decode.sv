@@ -1,13 +1,10 @@
 `default_nettype none
 // marks fetched lanes that must trap (fetch fault, illegal, ecall, ebreak) with their cause and value.
-module frontend_fault_decode (
-  // inputs
+module frontend_fault_decode #(parameter bit M_EXTENSION = 0) (
   input  wire [1:0] valid_i,
   input  wire [63:0] instruction_i, pc_i,
   input  wire fetch_fault_i,
   input  wire [31:0] fetch_cause_i,
-
-  // outputs
   output wire [1:0] fault_o,
   output wire [63:0] cause_o, value_o
 );
@@ -17,7 +14,7 @@ module frontend_fault_decode (
 
   // per-lane fault classification
   for (genvar lane = 0; lane < 2; lane++) begin : lanes
-    decoder decode (.instruction_i(instruction_i[lane*32 +: 32]), .decoded_o(decoded[lane]));
+    decoder #(.M_EXTENSION(M_EXTENSION)) decode (.instruction_i(instruction_i[lane*32 +: 32]), .decoded_o(decoded[lane]));
     assign fault_o[lane] = valid_i[lane] && (fetch_fault_i ||
       decoded[lane].op inside {OP_ILLEGAL, OP_ECALL, OP_EBREAK});
     assign cause_o[lane*32 +: 32] = fetch_fault_i ? fetch_cause_i :

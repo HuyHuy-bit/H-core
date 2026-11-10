@@ -24,8 +24,13 @@ using rv32::instruction;
 using rv32::signed_value;
 using rv32::arithmetic_right;
 using rv32::extend;
-using rv32::illegal;
-using rv32::operation;
+#ifndef TB_M_EXTENSION
+#define TB_M_EXTENSION 0
+#endif
+inline bool illegal(uint32_t insn) { return rv32::illegal(insn, TB_M_EXTENSION); }
+inline int operation(uint32_t insn) { return rv32::operation(insn, TB_M_EXTENSION); }
+// an OP funct7 that stays illegal in both modes; 0x02000033 is MUL x0 when M is on
+constexpr uint32_t ILLEGAL_FUNCT7 = TB_M_EXTENSION ? 0x04000033U : 0x02000033U;
 using rv32::evaluate;
 struct Input {
     bool reset=false, enable=true, flush=false, drain=false, grant=true, request_ready=true;
@@ -118,7 +123,7 @@ struct Bench {
         Expected e; e.op=unsigned(operation(insn));
         e.rd=e.op>=21 && e.op<=26 ? 0 : (insn>>7)&31;
         unsigned a=e.op<2 || e.op==27 ? 0 : (insn>>15)&31;
-        unsigned b=e.op<11 || e.op>=27 ? 0 : (insn>>20)&31;
+        unsigned b=(e.op<11 || e.op>=27) && e.op<36 ? 0 : (insn>>20)&31;
         require(known[a] && known[b],"read of unspecified register");
         e.result=evaluate(e.op,insn,pc,regs[a],regs[b]); e.next_pc=pc+4;
         if (e.op>=21 && e.op<=26) {
@@ -395,8 +400,19 @@ void program(Bench& b,std::mt19937& rng) {
         emit(instruction(op,0,0,0,8)); emit(instruction(2,30,30,0,1));
         emit(instruction(op,0,1,0,4));
     }
+#if TB_M_EXTENSION
+    // every m op on edge operands: x1=-63 x2=-56 ... then divide by zero (x0) and INT_MIN / -1
+    for (unsigned op=36;op<44;++op) { emit(instruction(op,10+op%10,4,5)); emit(instruction(op,11,6,0)); }
+    emit(instruction(0,31,0,0,0x80000000U)); emit(instruction(2,30,0,0,-1));
+    for (unsigned op=36;op<44;++op) emit(instruction(op,12,31,30));
+    emit(instruction(2,30,0,0,1)); emit(instruction(2,31,0,0,0x7ffU));
+#endif
     for (unsigned n=0;n<300;++n) {
+#if TB_M_EXTENSION
+        unsigned op=rng()%29; if (op>=21) op+=15;  // 21..28 -> m ops 36..43
+#else
         unsigned op=rng()%21;
+#endif
         emit(instruction(op,1+rng()%25,rng()%26,rng()%26,rng()));
         if (n%13==0) { emit(instruction(27,26,0,0,8)); emit(instruction(2,30,30,0,17)); }
     }

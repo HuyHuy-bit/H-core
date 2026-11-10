@@ -7,16 +7,59 @@ OSS_CAD_SUITE ?= $(HOME)/tools/oss-cad-suite-20260905/oss-cad-suite
 .PHONY: doctor platform-generate platform-check event-generate event-check memory-protocol-generate memory-protocol-check lockstep-check act4-check act4-upstream-check prf-check a1-probe-check a1-synth-check check-fast check nightly reference-check
 .PHONY: a1-timing-fetch a1-timing-check chip-timing-check chip-timing-repaired chip-librelane
 .PHONY: act4-tools act4-fetched-check
+.PHONY: cached-core-check
 .PHONY: sail-log-check sail-fetched-differential-check spike-fetched-differential-check
 .PHONY: assert-portability
-.PHONY: execution-backend-check fetch-unit-check cpu-top-check frontend-faults-check
+.PHONY: execution-backend-check fetch-unit-check cpu-top-check frontend-faults-check muldiv-unit-check
 .PHONY: system-core-check
 .PHONY: unit-runner-check
 .PHONY: head-trap-core-check
 .PHONY: csr-unit-check
+.PHONY: rename-bundle-check rename-state-check rename-checkpoints-check rename-recovery-check
+.PHONY: rename-recovery-ownership-check reorder-buffer-check rename-rob-check serial-retirement-check
+.PHONY: issue-queue-check issue-backend-check prf-mutation-check
+.PHONY: backend-check-start
 
 doctor:
 	@python3 tools/doctor.py --lock config/toolchain.lock --profile "$(PROFILE)"
+
+backend-check-start:
+	@python3 tools/check_backend.py --invalidate
+
+rename-bundle-check rename-state-check rename-checkpoints-check rename-recovery-check rename-recovery-ownership-check reorder-buffer-check rename-rob-check serial-retirement-check issue-queue-check issue-backend-check prf-check prf-mutation-check: | backend-check-start
+
+rename-bundle-check:
+	@python3 tools/run_unit.py rename_bundle --suite "$(OSS_CAD_SUITE)"
+
+rename-state-check:
+	@python3 tools/run_unit.py rename_state --suite "$(OSS_CAD_SUITE)"
+
+rename-checkpoints-check:
+	@python3 tools/run_unit.py rename_checkpoints --suite "$(OSS_CAD_SUITE)"
+
+rename-recovery-check:
+	@python3 tools/run_unit.py rename_recovery --suite "$(OSS_CAD_SUITE)"
+
+rename-recovery-ownership-check:
+	@python3 tools/run_rename_recovery_ownership.py --suite "$(OSS_CAD_SUITE)"
+
+reorder-buffer-check:
+	@python3 tools/run_unit.py reorder_buffer --suite "$(OSS_CAD_SUITE)"
+
+rename-rob-check:
+	@python3 tools/run_unit.py rename_rob --suite "$(OSS_CAD_SUITE)"
+
+serial-retirement-check:
+	@python3 tools/run_unit.py serial_retirement --suite "$(OSS_CAD_SUITE)"
+
+issue-queue-check:
+	@python3 tools/run_unit.py issue_queue --suite "$(OSS_CAD_SUITE)"
+
+issue-backend-check:
+	@python3 tools/run_unit.py issue_backend --suite "$(OSS_CAD_SUITE)"
+
+prf-mutation-check: prf-check
+	@python3 tools/run_prf_check.py --mutations
 
 assert-portability:
 	@python3 tools/run_assert_portability.py --suite "$(OSS_CAD_SUITE)"
@@ -24,6 +67,45 @@ assert-portability:
 .PHONY: committed-store-check
 committed-store-check:
 	@python3 tools/run_unit.py committed_store --suite "$(OSS_CAD_SUITE)"
+
+.PHONY: load-store-prepare-check load-transaction-check mmio-store-check
+.PHONY: data-port-check memory-path-check head-memory-check
+.PHONY: load-transaction-formal-check store-forward-check load-store-queue-check
+.PHONY: head-dispatch-check head-system-backend-check
+load-store-prepare-check:
+	@python3 tools/run_unit.py load_store_prepare --suite "$(OSS_CAD_SUITE)"
+
+load-transaction-check:
+	@python3 tools/run_unit.py load_transaction --suite "$(OSS_CAD_SUITE)"
+
+mmio-store-check:
+	@python3 tools/run_unit.py mmio_store_transaction --suite "$(OSS_CAD_SUITE)"
+
+data-port-check:
+	@python3 tools/run_unit.py data_port_arbiter --suite "$(OSS_CAD_SUITE)"
+
+memory-path-check:
+	@python3 tools/run_unit.py memory_transaction_path --suite "$(OSS_CAD_SUITE)"
+
+head-memory-check:
+	@python3 tools/run_unit.py head_memory_controller --suite "$(OSS_CAD_SUITE)"
+
+load-transaction-formal-check:
+	@python3 tools/run_memory_formal.py --profile load_transaction_handshake --suite "$(OSS_CAD_SUITE)"
+
+store-forward-check:
+	@python3 tools/run_memory_formal.py --profile store_forward --suite "$(OSS_CAD_SUITE)"
+	@python3 tools/run_memory_formal.py --profile store_forward_sb4 --suite "$(OSS_CAD_SUITE)"
+
+load-store-queue-check:
+	@python3 tools/run_memory_formal.py --profile load_store_queue --suite "$(OSS_CAD_SUITE)"
+	@python3 tools/run_memory_formal.py --profile load_store_queue_sb4 --suite "$(OSS_CAD_SUITE)"
+
+head-dispatch-check:
+	@python3 tools/run_unit.py head_dispatch --suite "$(OSS_CAD_SUITE)"
+
+head-system-backend-check:
+	@python3 tools/run_unit.py head_system_backend --suite "$(OSS_CAD_SUITE)"
 
 .PHONY: cpi-check
 cpi-check:
@@ -41,7 +123,7 @@ system-core-check:
 	@python3 tools/run_unit.py system_core --suite "$(OSS_CAD_SUITE)"
 
 unit-runner-check:
-	@python3 -m unittest -v tests/test_unit_runner.py
+	@python3 -m unittest -v tests/test_unit_runner.py tests/test_backend_acceptance.py
 
 .PHONY: measurement-check
 measurement-check:
@@ -62,6 +144,9 @@ cpu-top-check:
 fetch-unit-check:
 	@python3 tools/run_unit.py fetch_unit --suite "$(OSS_CAD_SUITE)"
 	@python3 tools/run_unit.py fetch_unit_icache --suite "$(OSS_CAD_SUITE)"
+
+muldiv-unit-check:
+	@python3 tools/run_unit.py muldiv_unit --suite "$(OSS_CAD_SUITE)"
 
 execution-backend-check:
 	@python3 tools/run_unit.py execution_backend --suite "$(OSS_CAD_SUITE)"
@@ -100,6 +185,11 @@ act4-tools:
 
 act4-fetched-check:
 	@python3 tools/run_act4_core.py --checkout "$(ACT4_CHECKOUT)" --sail "$(ACT4_SAIL)"
+
+cached-core-check:
+	@python3 tools/run_act4_core.py --config cached_core --checkout "$(ACT4_CHECKOUT)" --sail "$(ACT4_SAIL)"
+	@python3 tools/run_sail_differential.py --config cached_core --sail "$(ACT4_SAIL)"
+	@python3 tools/run_sail_differential.py --config cached_core --reference spike --spike "$(LOCKSTEP_SPIKE)"
 
 act4-upstream-check:
 	@python3 tools/check_act4.py --checkout "$(ACT4_CHECKOUT)" --sail "$(ACT4_SAIL)"
@@ -203,9 +293,10 @@ cache-array-timing-check:
 
 .PHONY: frontend-check backend-check execute-check memory-check system-check core-check check-all
 frontend-check: branch-predictor-check tage-predictor-check l1-icache-check fetch-unit-check
-backend-check: prf-check
-execute-check: execution-backend-check
-memory-check: l1-cache-array-check l1-dcache-check store-buffer-check load-store-unit-check load-store-queue-random-check committed-store-check
-system-check: csr-unit-check
-core-check: cpu-top-check frontend-faults-check head-trap-core-check system-core-check memory-core-check act4-fetched-check fetched-core-store-check sail-fetched-differential-check spike-fetched-differential-check early-load-core-check
+backend-check: rename-bundle-check rename-state-check rename-checkpoints-check rename-recovery-check rename-recovery-ownership-check reorder-buffer-check rename-rob-check serial-retirement-check issue-queue-check issue-backend-check prf-check prf-mutation-check
+	@python3 tools/check_backend.py
+execute-check: execution-backend-check muldiv-unit-check
+memory-check: l1-cache-array-check l1-dcache-check store-buffer-check load-store-unit-check load-store-queue-check load-store-queue-random-check store-forward-check load-store-prepare-check load-transaction-check load-transaction-formal-check committed-store-check mmio-store-check data-port-check memory-path-check head-memory-check
+system-check: csr-unit-check head-system-backend-check head-dispatch-check
+core-check: cpu-top-check frontend-faults-check head-trap-core-check system-core-check memory-core-check act4-fetched-check fetched-core-store-check sail-fetched-differential-check spike-fetched-differential-check early-load-core-check cached-core-check
 check-all: check frontend-check backend-check execute-check memory-check system-check core-check

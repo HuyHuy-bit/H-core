@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.act4_tools import CHECKOUT, SAIL, environment
 from tools.check_act4 import check_harness, check_upstream, check_sail
-from tools.run_sail_differential import build_fetched
+from tools.run_sail_differential import build_fetched, FETCHED_CONFIGS
 from verif.arch.elf_image import load_elf
 from verif.core.programs import constant, i, store, branch
 
@@ -50,7 +50,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkout', type=Path, default=CHECKOUT)
     parser.add_argument('--sail', type=Path, default=SAIL)
-    parser.add_argument('--config', default='memory_core', choices=('memory_core','early_load_core','cached_core'),
+    parser.add_argument('--config', default='memory_core', choices=FETCHED_CONFIGS,
                         help='fetched-core profile under config/')
     args = parser.parse_args()
     dut = DUT if args.config == 'memory_core' else {**DUT, 'name': f'fetched_{args.config}',

@@ -1,12 +1,8 @@
 `default_nettype none
-// tage512 tables: speculative lookup, ordered retirement re-lookup and training.
-// single-port defaults retain the immediate-update model contract (see README.md).
-// TRAIN_QUEUE: the update ports are retirement arrivals; each is hashed with its own retirement-time history into a
-// four-entry queue and one entry trains per cycle. A full queue drops the youngest arrivals (training is not architectural).
+// TAGE512 speculative lookup and ordered retirement training; single-port defaults update immediately.
 module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, parameter int UPDATES = 1,
                         parameter bit EXTERNAL_HISTORY = 0, parameter bit TRAIN_QUEUE = 0,
                         parameter bit SERIAL_LOOKUPS = 1) (  // AGE_BITS < 18 only to test aging
-  // inputs
   input  wire clk_i, rst_i,
   input  wire [LOOKUPS-1:0] lookup_valid_i,
   input  wire [LOOKUPS*32-1:0] lookup_pc_i,
@@ -14,8 +10,6 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
   input  wire [LOOKUPS-1:0] lookup_branch_i, lookup_path_i,
   input  wire [UPDATES-1:0] update_valid_i, update_taken_i,
   input  wire [UPDATES*32-1:0] update_pc_i, update_history_i,  // history before the branch; TRAIN_QUEUE only
-
-  // outputs
   output logic [LOOKUPS-1:0] lookup_taken_o,
   output logic [1:0] update_dropped_o
 );
@@ -35,9 +29,6 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     hash_t hash;
   } train_t;
   typedef struct packed {
-    logic [7:0] base_index;
-    logic [3:0][5:0] index;
-    logic [3:0][7:0] tag;
     logic provider_hit, alternate_hit;
     logic [1:0] provider, alternate;
     logic provider_prediction, alternate_prediction, weak_new, prediction;
@@ -72,29 +63,25 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     return r;
   endfunction
 
-  // provider is the longest tag hit, alternate the next longest, else the base
-  function automatic lookup_t probe(input hash_t k, input logic [255:0][1:0] base, input entry_t [3:0][63:0] banks,
+  // Choose the longest tag hit, then the next longest or base as alternate; e[b] is the indexed bank entry.
+  function automatic lookup_t probe(input logic [3:0][7:0] tag, input logic base_taken, input entry_t [3:0] e,
                                     input logic alternate_weak);
     lookup_t r = '0;
-    r.base_index = k.base_index;
-    r.index = k.index;
-    r.tag = k.tag;
     for (int b = 0; b < 4; b++) begin
-      if (banks[b][r.index[b]].valid && banks[b][r.index[b]].tag == r.tag[b]) begin
+      if (e[b].valid && e[b].tag == tag[b]) begin
         r.alternate_hit = r.provider_hit;
         r.alternate = r.provider;
         r.provider_hit = 1;
         r.provider = 2'(b);
       end
     end
-    r.alternate_prediction = r.alternate_hit ? !banks[r.alternate][r.index[r.alternate]].counter[2]
-                                             : base[r.base_index][1];
+    r.alternate_prediction = r.alternate_hit ? !e[r.alternate].counter[2] : base_taken;
     r.provider_prediction = r.alternate_prediction;
     r.prediction = r.alternate_prediction;
     if (r.provider_hit) begin
-      automatic logic [2:0] counter = banks[r.provider][r.index[r.provider]].counter;
+      automatic logic [2:0] counter = e[r.provider].counter;
       r.provider_prediction = !counter[2];
-      r.useful = banks[r.provider][r.index[r.provider]].useful;
+      r.useful = e[r.provider].useful;
       r.weak_new = r.useful == 0 && (counter == 3'b111 || counter == 3'b000);
       r.prediction = r.weak_new && alternate_weak ? r.alternate_prediction : r.provider_prediction;
     end
@@ -102,7 +89,10 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
   endfunction
   function automatic lookup_t lookup(input logic [17:2] pc, input logic [31:0] history,
       input logic [255:0][1:0] base, input entry_t [3:0][63:0] banks, input logic alternate_weak);
-    return probe(hash_of(pc, history), base, banks, alternate_weak);
+    automatic hash_t k = hash_of(pc, history);
+    automatic entry_t [3:0] e;
+    for (int b = 0; b < 4; b++) e[b] = banks[b][k.index[b]];
+    return probe(k.tag, base[k.base_index][1], e, alternate_weak);
   endfunction
 
   always_comb begin
@@ -125,7 +115,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     wire unused = ^update_history_i;
   end
 
-  // training queue: a shift queue, so entry 0 is the head and training starts at flops
+  // Train one queued entry per cycle; the four-entry queue drops youngest arrivals when full.
   localparam int DEPTH = 4;
   train_t head;
   logic head_valid;
@@ -165,56 +155,80 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     assign update_dropped_o = 0;
   end
 
-  // training, allocation and aging, in model order
+  // Update only indexed entries; later steps read through earlier writes and aging in model order.
+  localparam int STEPS = TRAIN_QUEUE ? 1 : UPDATES;
   always_comb begin
-    base_n = base_q;
-    table_n = table_q;
+    automatic logic [STEPS-1:0] step_valid, step_aging;
+    automatic hash_t [STEPS-1:0] step_hash;
+    automatic entry_t [STEPS-1:0][3:0] step_entry;
+    automatic logic [STEPS-1:0][1:0] step_base;
+    {step_valid, step_aging, step_hash, step_entry, step_base} = '0;
     chooser_n = chooser_q;
     age_n = age_q;
     history_n = history_q;
-    for (int step = 0; step < (TRAIN_QUEUE ? 1 : UPDATES); step++) if (TRAIN_QUEUE ? head_valid : update_valid_i[step]) begin
+    for (int step = 0; step < STEPS; step++) begin
       automatic hash_t k = TRAIN_QUEUE ? head.hash : hash_of(update_pc_i[step*32+2 +: 16], history_n);
-      automatic lookup_t r = probe(k, base_n, table_n, !chooser_n[3]);
       automatic logic taken = TRAIN_QUEUE ? head.taken : update_taken_i[step];
-      age_n = age_n + 1'b1;
-      if (!r.provider_hit) begin
-        base_n[r.base_index] = 2'(saturate(int'(base_n[r.base_index]), taken, 0, 3));
-      end else begin
-        automatic entry_t e = table_n[r.provider][r.index[r.provider]];
-        if (r.weak_new && r.provider_prediction != r.alternate_prediction)
-          chooser_n = 4'(saturate(int'($signed(chooser_n)), r.alternate_prediction == taken, -8, 7));
-        e.counter = 3'(saturate(int'($signed(e.counter)), taken, -4, 3));
-        if (r.provider_prediction != r.alternate_prediction)
-          e.useful = 2'(saturate(int'(e.useful), r.provider_prediction == taken, 0, 3));
-        table_n[r.provider][r.index[r.provider]] = e;
-        // usefulness is the pre-update value
-        if (r.useful == 0) begin
-          if (!r.alternate_hit) begin
-            base_n[r.base_index] = 2'(saturate(int'(base_n[r.base_index]), taken, 0, 3));
-          end else begin
-            e = table_n[r.alternate][r.index[r.alternate]];
-            e.counter = 3'(saturate(int'($signed(e.counter)), taken, -4, 3));
-            table_n[r.alternate][r.index[r.alternate]] = e;
-          end
-        end
-      end
-      // a correct new provider should mature instead of causing another allocation.
-      if (r.prediction != taken && !(r.weak_new && r.provider_prediction == taken)) begin
-        automatic logic found = 0;
+      automatic logic [1:0] base = base_q[k.base_index];
+      automatic entry_t [3:0] e;
+      automatic lookup_t r;
+      for (int b = 0; b < 4; b++) e[b] = table_q[b][k.index[b]];
+      for (int t = 0; t < step; t++) begin
+        if (step_valid[t] && step_hash[t].base_index == k.base_index) base = step_base[t];
         for (int b = 0; b < 4; b++) begin
-          if ((!r.provider_hit || b > int'(r.provider)) && !found
-              && (!table_n[b][r.index[b]].valid || table_n[b][r.index[b]].useful == 0)) begin
-            table_n[b][r.index[b]] = '{valid: 1, tag: r.tag[b], counter: taken ? 3'b000 : 3'b111, useful: 0};
-            found = 1;
+          if (step_valid[t] && step_hash[t].index[b] == k.index[b]) e[b] = step_entry[t][b];
+          if (step_aging[t]) e[b].useful = e[b].useful >> 1;
+        end
+      end
+      r = probe(k.tag, base[1], e, !chooser_n[3]);
+      step_valid[step] = TRAIN_QUEUE ? head_valid : update_valid_i[step];
+      step_aging[step] = 0;
+      if (step_valid[step]) begin
+        age_n = age_n + 1'b1;
+        if (!r.provider_hit) begin
+          base = 2'(saturate(int'(base), taken, 0, 3));
+        end else begin
+          if (r.weak_new && r.provider_prediction != r.alternate_prediction)
+            chooser_n = 4'(saturate(int'($signed(chooser_n)), r.alternate_prediction == taken, -8, 7));
+          e[r.provider].counter = 3'(saturate(int'($signed(e[r.provider].counter)), taken, -4, 3));
+          if (r.provider_prediction != r.alternate_prediction)
+            e[r.provider].useful = 2'(saturate(int'(e[r.provider].useful), r.provider_prediction == taken, 0, 3));
+          // usefulness is the pre-update value
+          if (r.useful == 0) begin
+            if (!r.alternate_hit) base = 2'(saturate(int'(base), taken, 0, 3));
+            else e[r.alternate].counter = 3'(saturate(int'($signed(e[r.alternate].counter)), taken, -4, 3));
           end
         end
-        // every longer candidate is useful: wear them down and defer allocation
-        if (!found) for (int b = 0; b < 4; b++) if (!r.provider_hit || b > int'(r.provider))
-          table_n[b][r.index[b]].useful = table_n[b][r.index[b]].useful - 2'(table_n[b][r.index[b]].useful != 0);
+        // a correct new provider should mature instead of causing another allocation.
+        if (r.prediction != taken && !(r.weak_new && r.provider_prediction == taken)) begin
+          automatic logic found = 0;
+          for (int b = 0; b < 4; b++) begin
+            if ((!r.provider_hit || b > int'(r.provider)) && !found && (!e[b].valid || e[b].useful == 0)) begin
+              e[b] = '{valid: 1, tag: k.tag[b], counter: taken ? 3'b000 : 3'b111, useful: 0};
+              found = 1;
+            end
+          end
+          // every longer candidate is useful: wear them down and defer allocation
+          if (!found) for (int b = 0; b < 4; b++) if (!r.provider_hit || b > int'(r.provider))
+            e[b].useful = e[b].useful - 2'(e[b].useful != 0);
+        end
+        step_aging[step] = age_n == 0;
+        history_n = {history_n[30:0], taken};
       end
-      if (age_n == 0) for (int b = 0; b < 4; b++) for (int i = 0; i < 64; i++)
-        table_n[b][i].useful = table_n[b][i].useful >> 1;
-      history_n = {history_n[30:0], taken};
+      step_hash[step] = k;
+      step_entry[step] = e;
+      step_base[step] = base;
+    end
+    // a valid step writes back all four indexed entries, so write enables come from flops, not from the probe
+    base_n = base_q;
+    table_n = table_q;
+    for (int step = 0; step < STEPS; step++) begin
+      for (int i = 0; i < 256; i++)
+        if (step_valid[step] && step_hash[step].base_index == 8'(i)) base_n[i] = step_base[step];
+      for (int b = 0; b < 4; b++) for (int i = 0; i < 64; i++) begin
+        if (step_valid[step] && step_hash[step].index[b] == 6'(i)) table_n[b][i] = step_entry[step][b];
+        if (step_aging[step]) table_n[b][i].useful = table_n[b][i].useful >> 1;
+      end
     end
   end
 

@@ -3,7 +3,7 @@
 #include <stdexcept>
 
 namespace rv32 {
-inline bool illegal(uint32_t insn) {
+inline bool illegal(uint32_t insn, bool m = false) {
     unsigned opcode=insn&127, f=(insn>>12)&7, upper=insn>>25;
     switch (opcode) {
     case 0x37: case 0x17: case 0x6f: return false;
@@ -12,7 +12,7 @@ inline bool illegal(uint32_t insn) {
     case 0x23: return f>2;
     case 0x63: return f==2 || f==3;
     case 0x13: return (f==1 && upper!=0) || (f==5 && upper!=0 && upper!=32);
-    case 0x33: return upper!=0 && !(upper==32 && (f==0 || f==5));
+    case 0x33: return upper!=0 && !(upper==32 && (f==0 || f==5)) && !(m && upper==1);
     case 0x0f: return f>1;
     case 0x73:
         if (f==1 || f==2 || f==3 || f==5 || f==6 || f==7) return false;
@@ -20,7 +20,8 @@ inline bool illegal(uint32_t insn) {
     default: return true;
     }
 }
-inline int operation(uint32_t insn) {
+// m ops are 36+funct3
+inline int operation(uint32_t insn, bool m = false) {
     unsigned opcode = insn&127, f = (insn >> 12)&7, upper = insn >> 25;
     if (opcode == 0x37) return 0;
     if (opcode == 0x17) return 1;
@@ -34,6 +35,7 @@ inline int operation(uint32_t insn) {
         const int ops[8] = {11, 13, 14, 15, 16, 17, 19, 20};
         if (upper == 0) return ops[f];
         if (upper == 32) return f == 0 ? 12 : f == 5 ? 18 : -1;
+        if (m && upper == 1) return 36+int(f);
     }
     if (opcode == 0x63) {
         const int branch[8] = {21,22,-1,-1,23,24,25,26};
@@ -44,6 +46,7 @@ inline int operation(uint32_t insn) {
     return -1;
 }
 inline uint32_t instruction(unsigned op, unsigned rd, unsigned a, unsigned b, uint32_t imm = 0) {
+    if (op >= 36 && op <= 43) return (1U << 25) | (b << 20) | (a << 15) | ((op-36) << 12) | (rd << 7) | 0x33;
     if (op >= 21 && op <= 26) {
         const unsigned function[6] = {0,1,4,5,6,7};
         return ((imm >> 12)&1U) << 31 | ((imm >> 5)&63U) << 25 | b << 20 | a << 15
@@ -68,6 +71,21 @@ inline uint32_t arithmetic_right(uint32_t a, unsigned shift) {
     if (shift && (a&0x80000000U)) result |= UINT32_MAX << (32-shift);
     return result;
 }
+// rv32m result by funct3; int64 holds every quotient, remainder and signed product exactly.
+inline uint32_t m_result(unsigned f3, uint32_t a, uint32_t b) {
+    int64_t sa = signed_value(a), sb = signed_value(b);
+    switch (f3) {
+    case 0: return a*b;
+    case 1: return uint32_t(uint64_t(sa*sb) >> 32);
+    case 2: return uint32_t(uint64_t(sa*int64_t(b)) >> 32);
+    case 3: return uint32_t((uint64_t(a)*b) >> 32);
+    case 4: return b ? uint32_t(sa/sb) : UINT32_MAX;
+    case 5: return b ? a/b : UINT32_MAX;
+    case 6: return b ? uint32_t(sa%sb) : a;
+    case 7: return b ? a%b : a;
+    default: throw std::runtime_error("bad rv32m funct3");
+    }
+}
 inline uint32_t evaluate(unsigned op, uint32_t insn, uint32_t pc, uint32_t a, uint32_t b) {
     uint32_t immediate = insn >> 20;
     if (immediate&2048) immediate |= 0xfffff000U;
@@ -87,6 +105,7 @@ inline uint32_t evaluate(unsigned op, uint32_t insn, uint32_t pc, uint32_t a, ui
     case 10: case 20: return a&b;
     case 21: case 22: case 23: case 24: case 25: case 26: return 0;
     case 27: case 28: return pc+4U;
+    case 36: case 37: case 38: case 39: case 40: case 41: case 42: case 43: return m_result(op-36, a, b);
     default: throw std::runtime_error("unsupported reference operation");
     }
 }

@@ -2,10 +2,9 @@
 // top-level two-wide core: fetch + predictor, execution_backend and identity recycling.
 module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE = 1, parameter bit MEMORY_SERVICE = 0,
                               parameter bit EARLY_LOADS = 0, parameter bit TAGE = 1, parameter bit DCACHE = 0,
-                              parameter bit ICACHE = 0,
+                              parameter bit ICACHE = 0, parameter bit M_EXTENSION = 0,
                               // TRACE=0 is the physical build: no reference-only event state
                               parameter bit TRACE = 1) (
-  // inputs
   input  wire clk_i, rst_i, enable_i, flush_i, drained_i,
   input  wire [31:0] flush_pc_i,
   input  wire request_ready_i,
@@ -19,8 +18,6 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   input  wire [1:0] execution_ready_i, completion_enable_i, retire_ready_i,
   input  wire resolve_grant_i,
   input  wire trap_ready_i,
-
-  // outputs
   output wire request_valid_o,
   output memory_protocol_pkg::mem_request_t request_o,
   output wire response_ready_o,
@@ -65,7 +62,7 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   // frontend fault classification
   if (FRONTEND_FAULTS) begin : faults
     // turns fetch faults and ecall/ebreak/illegal into per-lane fault tokens.
-    frontend_fault_decode decode (
+    frontend_fault_decode #(.M_EXTENSION(M_EXTENSION)) decode (
       .valid_i(2'b11), .instruction_i(decode_instruction), .pc_i(fetch_pc_o),
       .fetch_fault_i(decode_fault), .fetch_cause_i(fetch_fault_cause_o),
       .fault_o(frontend_fault), .cause_o(frontend_cause), .value_o(frontend_value)
@@ -85,8 +82,7 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   wire [31:0] branch_pc;
   wire running = !rst_i && !fatal_o;
 
-  // identity recycling and drain control
-  // drain holders and restart at the committed pc before recycling identities.
+  // Drain holders and restart at the committed PC before recycling identities.
   typedef enum logic [1:0] {RUN, STOP, RESTART, DRAIN} recycle_t;
   recycle_t recycle_q;
   logic [31:0] committed_pc_q;
@@ -146,7 +142,7 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   );
 
   // execution backend
-  execution_backend #(.SYSTEM_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .DCACHE(DCACHE), .EARLY_LOADS(EARLY_LOADS), .TRACE(TRACE), .CHECKPOINT_BITS(CHECKPOINT_BITS)) backend (
+  execution_backend #(.SYSTEM_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .DCACHE(DCACHE), .EARLY_LOADS(EARLY_LOADS), .TRACE(TRACE), .CHECKPOINT_BITS(CHECKPOINT_BITS), .M_EXTENSION(M_EXTENSION)) backend (
     .memory_issue_allowed_i(memory_issue_allowed_i && running), .admit_valid_i, .admit_id_i,
     .admission_valid_o, .admission_id_o, .admission_address_o, .admission_data_o, .admission_mask_o, .admission_size_o,
     .memory_prepare_o, .memory_busy_o, .memory_committed_o, .memory_irrevocable_o, .memory_fatal_o,
@@ -179,8 +175,6 @@ module cpu_top #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SERVICE =
   if (ICACHE && !DCACHE) begin : invalid_icache_configuration
     initial $error("ICACHE_REQUIRES_DCACHE");
   end
-
-  // checks
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin

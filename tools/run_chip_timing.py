@@ -13,9 +13,9 @@ from run_a1_probe import ROOT, digest, run, verify_synthesis_suite
 from run_a1_timing import analyze, sdc
 
 
-# chip_top pins cpu_top to the cached profile parameters, so it shares that profile's sources.
+# chip_top pins cpu_top to the cached RV32M profile parameters, so it shares that profile's sources.
 DEFAULT_TOP = "chip_top"
-DEFAULT_SOURCES = "cached_core"
+DEFAULT_SOURCES = "cached_core_m"
 # module-level defaults are imported by run_chip_librelane.py; main() overrides them for other tops.
 OUT = ROOT / "out/chip_timing"
 TOP = DEFAULT_TOP
@@ -78,8 +78,7 @@ def main() -> None:
     abc = OUT / "abc.constr"
     abc.write_text(f'set_driving_cell {config["abc_driver"]}\nset_load {config["abc_load_ff"]}\n')
     prefix = OUT.relative_to(ROOT)
-    # splitnets and hilomap remove the concatenated and constant assigns the pinned OpenSTA cannot parse;
-    # insbuf replaces the rest, output bits driven by one net (the cache's line write mask).
+    # Normalize concatenated, constant and shared-net assignments for the pinned OpenSTA parser.
     script = (f'read_slang --top {TOP} -D SYNTHESIS {" ".join(SOURCES)}; '
               f'synth -top {TOP} -flatten -noabc; dfflibmap -liberty {liberty} {dont_use}; '
               f'abc -liberty {liberty} {dont_use} -constr {abc.relative_to(ROOT)} -D {(args.abc_period or config["period_ns"]) * 1000}; '

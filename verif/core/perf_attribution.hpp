@@ -52,6 +52,9 @@ struct Frame {
     unsigned pick_id=0, forward_mask=0, memory_mask=0, response_id=0, load_complete_id=0;
     std::array<Load,8> lq{};
     std::array<Store,12> stores{};
+    unsigned fetch_lanes=0, recycle_state=0;
+    uint32_t rob_done=0, rob_solo=0;
+    bool resolve_offer=false, resolve_grant=false, system_busy=false, fault_pending=false, memory_irrevocable=false;
 };
 enum class Dependence { clear, address, data, partial };
 struct Disambiguation { Dependence reason=Dependence::clear; unsigned forwarded=0, memory=0; };
@@ -96,7 +99,30 @@ class Observer {
     std::array<Counts,2> counts;
     std::array<std::map<uint32_t,Counts>,2> pcs;
     uint64_t serial=0;
-    bool was_region=false;
+    bool was_region=false, recycling=false;
+    // cycle bounds for the pairing, solo-retire, held-resolve and identity-recycle restrictions
+    void restrictions(const Frame& f) {
+        const auto kind=[](uint32_t i){ const unsigned op=i&127;
+            return op==3 ? "load" : op==0x23 ? "store" : op==0x73 || op==0x0f ? "system" : nullptr; };
+        if (f.fetch_lanes==3 && f.allocated[0].valid && !f.allocated[1].valid) {
+            const uint32_t a=f.allocated[0].instruction, b=f.allocated[1].instruction;
+            add(f.region,std::string("pair_lost_")+(cfi(a) ? "cfi0" : kind(a) ? std::string(kind(a))+"0"
+                : kind(b) ? std::string(kind(b))+"1" : "other"));
+        }
+        const unsigned head=f.head&31, second=(f.head+1)&31;
+        if (f.retired[0].valid && !f.retired[1].valid && (f.rob_valid>>second&1) && (f.rob_done>>second&1)) {
+            const char* h=kind(f.retired[0].instruction);
+            add(f.region,std::string("retire_lost_")+((f.rob_solo>>head&1) ? std::string("solo_head_")+(h ? h:"other")
+                : (f.rob_solo>>second&1) ? "solo_second" : "other"));
+        }
+        if (f.resolve_offer && f.resolve_grant && (f.system_busy || f.fault_pending || f.memory_irrevocable)) {
+            add(f.region,std::string("resolve_held_")+(f.system_busy ? "system" : f.fault_pending ? "fault":"memory"));
+            add(f.region,"resolve_held_mispredict",f.mispredict);
+        }
+        if (f.recycle_state && !recycling) { recycling=true; add(f.region,"recycle_events"); }
+        if (recycling) add(f.region,"recycle_window_cycles");
+        if (recycling && !f.recycle_state && f.allocated[0].valid) recycling=false;
+    }
     void add(bool region,const std::string& key,uint64_t value=1) {
         counts[0][key]+=value;
         if (region) counts[1][key]+=value;
@@ -139,6 +165,7 @@ public:
         add(f.region,"completion1_conflict",f.alu1_pending && f.load_pending);
         add(f.region,"completion1_load_wait",f.load_pending && !f.completion1_accept);
         add(f.region,"completion1_alu_wait",f.alu1_pending && (f.load_pending || !f.completion1_accept));
+        restrictions(f);
 
         std::array<unsigned,16> awake{};
         std::array<int,2> winner{{-1,-1}};

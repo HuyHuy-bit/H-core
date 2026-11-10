@@ -1,7 +1,6 @@
 `default_nettype none
 // two-wide 32-entry rob with 8-bit generations: allocation, completion, resolution, retirement and traps.
 module reorder_buffer #(parameter bit TRACE = 1) (
-  // inputs
   input  wire clk_i, rst_i, flush_i, drained_i,
   input  wire [1:0] allocate_i, allocate_cfi_i, allocate_solo_i,
   input  wire [9:0] allocate_rd_i,
@@ -17,8 +16,6 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   input  wire [12:0] serial_id_i,
   input  commit_event_pkg::commit_event_t serial_event_i,
   input  wire trap_take_i,
-
-  // outputs
   output logic [1:0] allocate_ready_o, allocate_accept_o,
   output logic [25:0] allocate_id_o,
   output logic [1:0] complete_ready_o, complete_accept_o,
@@ -38,8 +35,6 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   output logic identity_drain_o
 );
   import commit_event_pkg::*;
-
-  // checks
 `ifndef SYNTHESIS
   initial begin
     assert (COMMIT_SLOTS == 2 && COMMIT_EVENT_SHA256 != "") else $fatal(1, "ROB2_EVENT_SCHEMA");
@@ -50,8 +45,7 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   logic [4:0] rd_q [32];
   logic [31:0] pc_q [32];
   logic [5:0] destination_q [32], stale_q [32];
-  // per-entry state the hardware reads: trap flag, then predictor bits or the 4-bit cause,
-  // then a branch's next pc or the trap value (other entries continue at pc+4). TRACE adds the full event record for reference comparison.
+  // Hardware entries retain trap/prediction and next-PC/trap-value fields; TRACE adds full reference events.
   logic [31:0] trap_q;
   logic [16:0] info_q [32];
   logic [31:0] aux_q [32];
@@ -136,9 +130,10 @@ module reorder_buffer #(parameter bit TRACE = 1) (
     if (!rst_i && !clear_window && !branch_recover_o) begin
       retire_valid_o[0] = serial_selected || (count_q != 0 && done_q[head_q] && !trap_q[head_q]
         && (!cfi_q[head_q] || resolved_q[head_q]));
+      // a serial head retirement (never done) retires alone; a done solo head (an early cached load) may pair.
       retire_valid_o[1] = retire_valid_o[0] && count_q > 1 && done_q[second_head]
         && !trap_q[second_head] && (!cfi_q[second_head] || resolved_q[second_head])
-        && !solo_q[head_q] && !solo_q[second_head];
+        && done_q[head_q] && !solo_q[second_head];
     end
   end
   assign retire_accept_o = retire_take_i & retire_valid_o;
@@ -262,8 +257,6 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   end else begin : physical
     assign trace_event = '0;
   end
-
-  // checks
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin

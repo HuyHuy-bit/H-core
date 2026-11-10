@@ -37,8 +37,21 @@ def unpack_event(words):
     return event
 
 
+def m_result(f3, a, b, width=32):
+    """RV32M result for funct3 on unsigned width-bit operands."""
+    mask = (1 << width) - 1
+    sa, sb = signed(a, width), signed(b, width)
+    if f3 < 4:
+        x, y = [(sa, sb), (sa, sb), (sa, b), (a, b)][f3]
+        return (x*y >> (width if f3 else 0)) & mask
+    if b == 0: return mask if f3 < 6 else a
+    x, y = (sa, sb) if f3 in (4, 6) else (a, b)
+    q = abs(x) // abs(y) * (-1 if (x < 0) != (y < 0) else 1)
+    return (q if f3 < 6 else x - q*y) & mask
+
+
 class Reference:
-    def __init__(self, image, mode='normal'):
+    def __init__(self, image, mode='normal', m_extension=False):
         self.memory = bytearray(image) + bytearray(65536-len(image))
         self.mmio = {}
         self.registers = [None]*32
@@ -47,6 +60,8 @@ class Reference:
         self.order = 0
         self.csrs = {a: int(c['reset'], 0) for a, c in CSRS.items()}
         self.mode = mode
+        self.m_extension = m_extension
+        if m_extension: self.csrs[0x301] |= 1 << 12
 
     def read(self, address, size):
         return sum((self.memory[a] if a < len(self.memory) else self.mmio.get(a, 0)) << (8*i)
@@ -68,7 +83,7 @@ class Reference:
         source2 = r2 if opcode in (0x33, 0x63, 0x23) else 0
         legal = (opcode in (0x37, 0x17, 0x6f)
                  or (opcode == 0x13 and (f3 not in (1, 5) or (f3 == 1 and f7 == 0) or (f3 == 5 and f7 in (0, 32))))
-                 or (opcode == 0x33 and (f7 == 0 or (f7 == 32 and f3 in (0, 5))))
+                 or (opcode == 0x33 and (f7 == 0 or (f7 == 32 and f3 in (0, 5)) or (f7 == 1 and self.m_extension)))
                  or (opcode == 0x63 and f3 in (0, 1, 4, 5, 6, 7))
                  or (opcode == 0x67 and f3 == 0)
                  or (opcode == 0x03 and f3 in (0, 1, 2, 4, 5))
@@ -87,7 +102,8 @@ class Reference:
         elif not legal: trap = (2, ins)
         elif opcode in (0x13, 0x33):
             v = imm & MASK if opcode == 0x13 else b
-            if f3 == 0: value = a-v if opcode == 0x33 and f7 == 32 else a+v
+            if opcode == 0x33 and f7 == 1: value = m_result(f3, a, b)
+            elif f3 == 0: value = a-v if opcode == 0x33 and f7 == 32 else a+v
             elif f3 == 1: value = a << (v & 31)
             elif f3 == 2: value = int(signed(a) < signed(v))
             elif f3 == 3: value = int(a < v)

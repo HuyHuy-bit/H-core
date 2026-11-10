@@ -39,7 +39,7 @@ int main(int argc,char** argv) {
     try {
         const unsigned seed=argc>1 ? std::stoul(argv[1]) : 1;
         std::mt19937 rng(seed); Bench b; b.fault_support=true; b.trap_service=true;
-        const std::array<uint32_t,20> faults={0,0xffffffff,0x02000033,0x40001033,
+        const std::array<uint32_t,20> faults={0,0xffffffff,ILLEGAL_FUNCT7,0x40001033,
             0xfff01013,0x02005013,0x00001067,0x00002063,0x00003003,0x00006003,
             0x00003023,0x0000200f,0x00004073,0x00300073,0x0000002f,0x00000001,
             0x000000f3,0x00108073,0x00000073,0x00100073};

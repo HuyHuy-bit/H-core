@@ -5,7 +5,7 @@ package core_pkg;
   // decoded instruction and rename types
   typedef enum logic [4:0] {
     OP_ILLEGAL, OP_ALU, OP_LUI, OP_AUIPC, OP_JAL, OP_JALR, OP_BRANCH,
-    OP_LOAD, OP_STORE, OP_CSR, OP_ECALL, OP_EBREAK, OP_MRET, OP_FENCE, OP_WFI, OP_FENCE_I
+    OP_LOAD, OP_STORE, OP_CSR, OP_ECALL, OP_EBREAK, OP_MRET, OP_FENCE, OP_WFI, OP_FENCE_I, OP_MULDIV
   } operation_e;
   typedef struct packed {
     operation_e op;

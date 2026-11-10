@@ -1,9 +1,6 @@
 `default_nettype none
-// rob-head system owner: csr/mret/wfi/fence/fence.i and trap entry through csr_unit.
-// CLEAN=1: a fence.i first waits for order (empty store buffer), then cleans l1_dcache before it is prepared.
-// Its clean's end invalidates l1_icache, so the fetch of pc+4 after its redirect reads the cleaned memory.
-module head_system_controller #(parameter bit CLEAN = 0) (
-  // inputs
+// ROB-head system/trap service; CLEAN makes FENCE.I drain stores, clean D-cache, then invalidate I-cache.
+module head_system_controller #(parameter bit CLEAN = 0, parameter bit M_EXTENSION = 0) (
   input  wire clk_i, rst_i, cancel_i,
   input  wire [1:0] retire_accept_i,
   input  wire head_valid_i,
@@ -18,8 +15,6 @@ module head_system_controller #(parameter bit CLEAN = 0) (
   input  wire illegal_accept_i,
   input  wire trap_accept_i,
   input  wire clean_done_i,
-
-  // outputs
   output wire prepare_o, busy_o,
   output wire serial_offer_o,
   output wire [12:0] serial_id_o,
@@ -71,9 +66,7 @@ module head_system_controller #(parameter bit CLEAN = 0) (
   assign redirect_o = accepted_trap || (accepted_serial && redirect_q);
   assign redirect_pc_o = redirect_o ? next_pc : 32'd0;
 
-  // fence.i data-cache clean
-  // order_ready_i covers the store buffer and a running clean, so the pulse never meets a held write or a clean;
-  // a cancelled wait leaves the cache busy until its clean ends.
+  // Start cleaning only after stores drain; cancellation leaves an active clean running to completion.
   assign clean_o = clean_q == CLEAN_PULSE;
   assign invalidate_o = invalidate_q;
   assign fence_i_o = CLEAN && fence_i_head && clean_q != CLEAN_DONE;
@@ -113,8 +106,7 @@ module head_system_controller #(parameter bit CLEAN = 0) (
     end
   end
 
-  // retirement and trap events
-  // an illegal csr first completes as a raw fault; the next head request enters the trap.
+  // An illegal CSR completes as a raw fault before the next head request enters the trap.
   always_comb begin
     illegal_event_o = '0;
     trap_event_o = '0;
@@ -139,7 +131,7 @@ module head_system_controller #(parameter bit CLEAN = 0) (
   end
 
   // machine-mode csr state
-  csr_unit state_bank (
+  csr_unit #(.M_EXTENSION(M_EXTENSION)) state_bank (
     .clk_i, .rst_i, .cancel_i,
     .retire_count_i(2'($countones(retire_accept_i & ~{1'b0, serial_accept_i}))),
     .request_valid_i(request), .request_ready_o(request_ready),
@@ -151,8 +143,6 @@ module head_system_controller #(parameter bit CLEAN = 0) (
     .legal_o(legal), .read_o(unused_state[64]), .value_o(value), .next_pc_o(next_pc), .effects_o(effects),
     .mtvec_o(unused_state[63:32]), .mepc_o(unused_state[31:0])
   );
-
-  // checks
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i && !cancel_i) begin
