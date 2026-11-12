@@ -1,4 +1,4 @@
-<h1 align="center">Speculative Out-of-Order RISC-V Core</h1>
+<h1 align="center">H Core</h1>
 
 Hi everyone! This is the RV32IM processor I’ve researched and designed over the
 past semester. It's my first step into superscalar design, with multicore development
