@@ -1,24 +1,8 @@
 `default_nettype none
-// Replays +stimulus lines "op a b c d e f" (seven hex fields) against l1_dcache; a memory model answers its
-// line requests.
-//   0 load: id address size unsigned expected timed     timed: respond exactly HIT_STAGES cycles after acceptance
-//   1 write: address data mask timed                    held until write_done_o; timed: done 2 cycles after present
-//   2 clean    3 kill (a=1: keep issuing in the kill cycle)    4 barrier: wait until nothing is outstanding
-//   5 expect request: kind (0 fill, 1 writeback) base way     6 fault: 0 next fill, 1 next writeback, 2 protocol
-//     status, 3 wrong id, 4 uncached data (next response), 5 line data on the next writeback, 6 next fill faults
-//     with line data    7 idle a cycles    8 continue in the next write_done_o cycle
-//   9 expect fatal (last line); then present a clean and a load every cycle and require silence
-//   a timing: latency (0: random 1..50) ready_delay (ff: random) no_gaps
-//   b continue a cycles before (b=0) or after (b=1) the response of the current or next request
-//   c present an unsolicited response this cycle, once nothing is outstanding at the memory
-// Always checked: load data against the line and a byte shadow, writeback and fill data against the shadow, one
-// outstanding transaction, requests never withdrawn, no duplicate valid tag, fatal only after an injected fault,
-// a watchdog on the oldest access and a bound on every line's wait. +exact also checks each request and install
-// way against the expect lines.
-// Like the LSU, the bench presents no write or clean while cleaning and no load overlapping the held write, except
-// right after op 8. +trace prints events.
+// replay seven-field hex stimuli against load/store, byte-shadow, line-traffic and protocol scoreboards.
 module l1_dcache_tb;
   import memory_protocol_pkg::*;
+
   localparam int SETS = 16, MAX_LATENCY = 50, WATCHDOG = 4 * MAX_LATENCY + 64, QUIET = 300;
   localparam int CLEAN_WATCHDOG = WATCHDOG + 2 * SETS * (MAX_LATENCY + 8);
 
@@ -89,7 +73,7 @@ module l1_dcache_tb;
     if (found.size() != 0) order.delete(found[0]);
   endfunction
 
-  // stimulus
+  // stimulus parsing and outstanding-command state
   string path, text;
   int fd, lines = 0, op, cycle = 0, gap = 0, idle_left = 0, sync_due = -1, quiet_left = -1;
   logic [31:0] a, b, c, d, e, f;
@@ -106,7 +90,7 @@ module l1_dcache_tb;
   // +exact expectations
   int expect_kind[$], expect_way[$], install_way = -1, install_set = -1;
   int unsigned expect_base[$];
-  // counts reported on PASS
+  // coverage counters reported on PASS
   int responses = 0, writes = 0, fills = 0, writebacks = 0, kills = 0, parks = 0, cleans = 0;
   // handshakes of the current cycle
   bit load_accept;
@@ -143,6 +127,8 @@ module l1_dcache_tb;
         gap = (op <= 1 && !no_gaps && $urandom_range(3) == 0) ? $urandom_range(1, 3) : 0;
       end
       case (op)
+
+        // load: ID, address, size, unsigned, expected data and exact hit-latency flag.
         0: begin
           if (gap > 0 || (write_held && overlaps_write(b, c[1:0]) && !(sync_allow && write_done))) break;
           if (!started) begin
@@ -153,6 +139,8 @@ module l1_dcache_tb;
           {load_valid, load_id, load_address, load_size, load_unsigned} = {1'b1, a[12:0], b, c[1:0], d[0]};
           break;
         end
+
+        // write: address, data, mask and exact landing-latency flag; hold until write_done_o.
         1: begin
           if (gap > 0 || write_held || cleaning) break;
           {write_valid, write_address, write_data, write_mask, write_timed} = {1'b1, a, b, c[3:0], d[0]};
@@ -194,6 +182,8 @@ module l1_dcache_tb;
           expect_way.push_back(c);
           have = 0;
         end
+
+        // inject the next fill/writeback fault or malformed status, ID or payload.
         6: begin
           fault_kind = a;
           have = 0;
@@ -218,6 +208,8 @@ module l1_dcache_tb;
           have = 0;
           break;
         end
+
+        // timing: latency (0 random), ready delay (ff random), and no-gaps flag.
         'ha: begin
           fixed_latency = a;
           ready_delay = b == 'hff ? -1 : b;
@@ -247,7 +239,7 @@ module l1_dcache_tb;
     end
   endtask
 
-  // settled outputs of this cycle
+  // score byte data, access order, watchdogs, unique tags and injected faults.
   task automatic check();
     load_accept = load_valid && load_ready;
     accept_shadow = shadow_load(load_address, load_size, load_unsigned);
@@ -299,6 +291,7 @@ module l1_dcache_tb;
     if (have && cycle - line_since > 2 * CLEAN_WATCHDOG) $fatal(1, "FAIL cycle %0d: line %0d stalled", cycle, lines);
   endtask
 
+  // memory target checks line traffic against the shadow and schedules one response.
   task automatic accept_request();
     int unsigned base = request.address;
     mem_response_status_e status = MEM_STATUS_OK;

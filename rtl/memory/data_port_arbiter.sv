@@ -1,7 +1,6 @@
 `default_nettype none
 // round-robin owner of the single data port for the load, committed-store and mmio engines.
 module data_port_arbiter (
-  // inputs
   input  wire clk_i, rst_i,
   input  wire [2:0] reserve_i, client_fatal_i,
   input  wire [2:0] client_request_valid_i,
@@ -11,7 +10,6 @@ module data_port_arbiter (
   input  wire response_valid_i,
   input  memory_protocol_pkg::mem_response_t response_i,
 
-  // outputs
   output wire [2:0] grant_o, owner_o,
   output logic [2:0] client_request_ready_o,
   output logic [2:0] client_response_valid_o,
@@ -24,6 +22,7 @@ module data_port_arbiter (
   output logic [1:0] fatal_reason_o,
   output logic [2:0] fatal_clients_o
 );
+
   typedef enum logic [1:0] {IDLE, REQUEST, RESPONSE} state_e;
   state_e state_q;
   logic [1:0] owner_q, next_q, selected;
@@ -64,8 +63,7 @@ module data_port_arbiter (
     end
   end
 
-  // bus ownership and fault state
-  // registered client faults block the next grant without a response-completion bubble.
+  // bus ownership and fault state; registered client faults block the next grant.
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       state_q <= IDLE;
@@ -91,7 +89,7 @@ module data_port_arbiter (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (active && !unexpected) begin
     assert (state_q != REQUEST || client_request_valid_i[owner_q])

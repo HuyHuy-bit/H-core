@@ -28,7 +28,7 @@
     20260916
   ],
   "random_cycles_per_seed": 20000,
-  "directed_cycles": 255,
+  "directed_cycles": 257,
   "verification": "Normal directed, random and drain stimulus assigns CFIs exclusively to port zero and offers live branch resolution only after a prior accepted issue. The independent ledger rejects accepted resolution of an unissued branch or allocation of a CFI with other port eligibility; separate negative tests verify both stimulus guards. branch_issue counts checked CFI launches, and resolution_after_issue counts accepted resolutions guarded by prior issue. simultaneous_checkpoint_create_resolve counts overlapping checkpoint creation and resolution, not release and later reallocation of the same checkpoint slot. These are scenario counters, not an exhaustive coverage or liveness claim. Head-read probes include every physical tag, all four operand/writeback-lane bypass combinations, all four readiness pairs, stale and resultless completions, nonzero duplicate tags, p0, freed and reclaimed sources, simultaneous retirement/allocation, and reset/flush/trap. Random probes use a separate seed-derived generator and drive nonzero tags even when the hook is inactive.",
   "system_hooks": "queue_skip_i excludes reserved descriptors from IQ credits/insertion. head_read_i reserves PRF ports zero and one for the two packed six-bit head_source_i tags and suppresses both IQ issue lanes. serial_offer_i/id/event drive existing atomic retirement; serial_accept_o reports actual acceptance. The standalone issue-backend test exercises head reads with allocation, completion, retirement and recovery while holding queue-skip and serial hooks inactive. Production CSR ownership/arbitration is verified by system_core; its unused second source is p0."
 }

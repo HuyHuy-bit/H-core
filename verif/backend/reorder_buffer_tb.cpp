@@ -17,21 +17,25 @@ using packed_bits::get;
 #include <vector>
 
 using Event = std::array<uint32_t, (EVENT_BITS+31)/32>;
+
 struct Entry {
     unsigned id, rd, destination, stale, pc;
     bool cfi, solo, done = false, resolved = false;
     Event event{};
 };
+
 struct Completion {
     unsigned id = 0;
     bool offer = false, take = false, solo = false;
     Event event{};
 };
+
 struct Input {
     unsigned alloc = 0, cfi = 0, solo = 0, retire = 0, resolve_id = 0;
     bool reset = false, flush = false, drain = false, resolve = false, resolve_take = false, mispredict = false, trap = false;
     std::array<Completion, 2> complete{};
 };
+
 class Check {
     Vreorder_buffer dut;
     unsigned tail = 0, serial = 0;
@@ -42,14 +46,20 @@ public:
     std::vector<unsigned> old_ids;
     std::map<std::string, unsigned> coverage;
     unsigned cycles = 0;
+    bool obey = true;  // false: negative cases drive illegal requests unmasked
+    bool recover_pending = false;  // a mispredict accepted last cycle: this cycle recovers it
+    unsigned recover_id = 0;
+
     void require(bool ok, const std::string& what) const {
         if (!ok) throw std::runtime_error("rob two wide mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     unsigned credits() const {
         unsigned n = 0;
         while (n < 2 && queue.size()+n < 32 && uses[(tail+n)%32] < 256) ++n;
         return n;
     }
+
     unsigned eligible() const {
         unsigned n = 0;
         for (const auto& e : queue) {
@@ -59,10 +69,12 @@ public:
         }
         return n;
     }
+
     unsigned locate(unsigned id) const {
         for (unsigned i = 0; i < queue.size(); ++i) if (queue[i].id == id) return i;
         return queue.size();
     }
+
     Completion result(unsigned i, std::mt19937& rng, bool trap = false, bool solo = false) const {
         Completion c; c.id = queue.at(i).id; c.offer = c.take = true; c.solo = solo;
         for (auto& word : c.event) word = rng();
@@ -71,6 +83,7 @@ public:
         if (!trap && !queue.at(i).cfi) put(c.event, PC_AFTER_OFFSET, 32, queue.at(i).pc + 4);
         return c;
     }
+
     template<class T> void event_equal(const T& actual, unsigned lane, Event expected, bool trapped) {
         put(expected, VALID_OFFSET, 1, 1);
         put(expected, ORDER_OFFSET, 64, order+lane);
@@ -78,23 +91,28 @@ public:
         for (unsigned b = 0; b < EVENT_BITS; ++b)
             require(bit(actual, lane*EVENT_BITS+b) == bit(expected, b), "event payload bit="+std::to_string(b));
     }
+
     void run(const Input& in = {}) {
         ++cycles;
         const bool active = !in.reset && !in.flush;
         const bool trap_valid = active && !queue.empty() && queue.front().done && bit(queue.front().event, TRAP_OFFSET);
         const bool trap_accept = trap_valid && in.trap;
-        const auto ri = locate(in.resolve_id);
-        const bool resolve_ready = active && !trap_accept && ri < queue.size() && queue[ri].cfi && !queue[ri].resolved;
+        // accepted mispredicts hold allocation, retirement and younger completions through next-cycle recovery.
+        const bool recover = recover_pending && !in.flush;
+        const unsigned resolve_id = recover ? recover_id : in.resolve_id;
+        const auto ri = locate(resolve_id);
+        const bool recover_hold = recover || (in.resolve && in.mispredict && ri < queue.size());
+        const bool resolve_ready = active && !trap_valid && ri < queue.size() && queue[ri].cfi && !queue[ri].resolved;
         const bool resolve = in.resolve && in.resolve_take && resolve_ready;
-        const bool recover = resolve && in.mispredict;
-        const unsigned allocation_ready = active && !trap_accept && !recover && !in.drain ? (1U << credits())-1 : 0;
+        const bool mispredict = resolve && in.mispredict;
+        const unsigned allocation_ready = active && !trap_valid && !recover_hold && !in.drain ? (1U << credits())-1 : 0;
         const unsigned allocation = ((1U << in.alloc)-1) & allocation_ready;
-        const unsigned retire_valid = active && !trap_accept && !recover ? (1U << eligible())-1 : 0;
+        const unsigned retire_valid = active && !recover_hold ? (1U << eligible())-1 : 0;
         const unsigned retirement = ((1U << in.retire)-1) & retire_valid;
         unsigned cr = 0, ca = 0;
         for (unsigned lane = 0; lane < 2; ++lane) {
             const auto& c = in.complete[lane]; const auto pos = locate(c.id);
-            bool ready = active && !trap_accept && pos < queue.size() && !queue[pos].done && (!recover || pos <= ri);
+            bool ready = active && !trap_valid && pos < queue.size() && !queue[pos].done && (!recover_hold || pos <= ri);
             if (lane && in.complete[0].offer && c.id == in.complete[0].id) ready = false;
             cr |= unsigned(ready) << lane;
             ca |= unsigned(ready && c.offer && c.take) << lane;
@@ -102,7 +120,10 @@ public:
         dut.serial_offer_i = 0; dut.serial_id_i = 0;
         for (unsigned word=0;word<(EVENT_BITS+31)/32;word++) dut.serial_event_i[word]=0;
         dut.clk_i = 0; dut.rst_i = in.reset; dut.flush_i = in.flush; dut.drained_i = in.drain;
-        dut.allocate_i = (1U << in.alloc)-1; dut.allocate_cfi_i = in.cfi; dut.allocate_solo_i = in.solo;
+        // outside a flush, trap or recovery cycle the caller raises allocate and retire only when ready
+        const bool exempt = !obey || in.flush || trap_accept || recover;
+        const bool clear = !obey || in.flush || trap_accept;
+        dut.allocate_i = exempt ? (1U << in.alloc)-1 : allocation; dut.allocate_cfi_i = in.cfi; dut.allocate_solo_i = in.solo;
         dut.allocate_pc_i = 0;
         dut.allocate_rd_i = dut.allocate_destination_i = dut.allocate_stale_i = 0;
         for (unsigned lane = 0; lane < 2; ++lane) {
@@ -116,12 +137,14 @@ public:
         for (unsigned w = 0; w < (2*EVENT_BITS+31)/32; ++w) dut.complete_event_i[w] = 0;
         for (unsigned lane = 0; lane < 2; ++lane) {
             const auto& c = in.complete[lane];
-            dut.complete_offer_i |= unsigned(c.offer) << lane; dut.complete_take_i |= unsigned(c.take) << lane;
+            dut.complete_offer_i |= unsigned(c.offer) << lane;
+            dut.complete_take_i |= unsigned(c.take && (clear || ((cr >> lane) & 1))) << lane;
             dut.complete_solo_i |= unsigned(c.solo) << lane; dut.complete_id_i |= c.id << (lane*13);
             for (unsigned b = 0; b < EVENT_BITS; ++b) put(dut.complete_event_i, lane*EVENT_BITS+b, 1, bit(c.event, b));
         }
-        dut.resolve_offer_i = in.resolve; dut.resolve_take_i = in.resolve_take; dut.resolve_id_i = in.resolve_id;
-        dut.mispredict_i = in.mispredict; dut.trap_take_i = in.trap; dut.retire_take_i = (1U << in.retire)-1;
+        dut.resolve_offer_i = in.resolve; dut.resolve_id_i = resolve_id;
+        dut.resolve_take_i = in.resolve_take && (clear || (in.resolve && resolve_ready));
+        dut.recover_hold_i = recover_hold; dut.mispredict_i = in.mispredict; dut.trap_take_i = in.trap; dut.retire_take_i = exempt ? (1U << in.retire)-1 : retirement;
         dut.eval();
         require(dut.occupancy_o == queue.size(), "occupancy");
         require(bool(dut.identity_drain_o) == std::any_of(uses.begin(), uses.end(), [](unsigned n) { return n == 256; }), "identity drain");
@@ -161,7 +184,7 @@ public:
         coverage["flush_live"] += in.flush && !queue.empty();
         coverage["reset_live"] += in.reset && !queue.empty();
         coverage["recovery"] += recover;
-        coverage["recovery_wrap"] += recover && (queue.front().id%32 > in.resolve_id%32);
+        coverage["recovery_wrap"] += recover && (queue.front().id%32 > resolve_id%32);
         coverage["recovery_complete"] += recover && ca;
         coverage["recovery_suppression"] += recover && (in.alloc || in.retire);
         coverage["resolution_complete"] += resolve && ca;
@@ -172,6 +195,8 @@ public:
         coverage["wrap_block"] += uses[tail] == 256 && !in.drain && active;
         coverage["drain"] += in.drain;
         coverage["trap_priority"] += trap_accept && in.resolve;
+        recover_pending = !in.reset && !in.flush && !trap_accept && mispredict;
+        recover_id = resolve_id;
         if (in.reset) {
             queue.clear(); uses.fill(0); old_ids.clear(); tail = serial = 0; order = 0;
         } else {
@@ -222,6 +247,7 @@ void empty(Check& c, std::mt19937& rng) {
         c.run(in);
     }
 }
+
 void directed(Check& c, std::mt19937& rng) {
     Input in; in.reset = true; c.run(in);
     for (unsigned i = 0; i < 16; ++i) { in = {}; in.alloc = 2; c.run(in); }
@@ -282,12 +308,13 @@ void directed(Check& c, std::mt19937& rng) {
     in = {}; in.drain = true; c.run(in);
     in = {}; in.alloc = 2; c.run(in); empty(c, rng);
 }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     try {
         if (argc > 2 && std::string(argv[1]) == "negative") {
             Check c; Input in; in.reset = true; c.run(in); in = {}; in.alloc = 2; c.run(in);
-            in = {}; const std::string name = argv[2];
+            in = {}; const std::string name = argv[2]; c.obey = false;
             if (name == "drain_live") in.drain = true;
             else if (name == "complete_stale") { in.complete[0].offer = in.complete[0].take = true; in.complete[0].id = 99; }
             else if (name == "resolve_stale") { in.resolve = in.resolve_take = true; in.resolve_id = 99; }

@@ -18,6 +18,8 @@ module rename_recovery_ownership (
   logic [2:0] count, next_count;
   logic [191:0] committed, next_committed, map, walk;
   logic [63:0] owned, expected_ready, available, ready_view, expected_reclaim;
+  // the rename planner reads the registered ready table, without this cycle's writebacks.
+  logic [63:0] planner_view;
   logic [7:0] slots, expected_released;
   logic [1:0] expected_accept, expected_wb, commit_offer, expected_commit;
   logic [11:0] expected_destination, expected_stale, expected_source1, expected_source2;
@@ -41,13 +43,19 @@ module rename_recovery_ownership (
   wire [7:0] slot_valid, released;
   logic past_valid;
   initial past_valid = 0;
+  // the reorder buffer registers an accepted mispredict and recovers it one cycle later under the same id.
+  logic recover_q;
+  logic [2:0] recover_id_q;
+  wire recovery = recover_q && !rst && !recover;
+  // the caller's held cycles: an offered mispredict and the recovery cycle.
+  wire held = recovery || (resolve && mispredict);
 
   rename_recovery dut (
     .clk_i(clk), .rst_i(rst), .recover_i(recover), .resources_ready_i(resources && room),
     .valid_i(valid), .checkpoint_i(checkpoint), .rd_i(rds), .rs1_i(rs1s), .rs2_i(rs2s),
     .wb_offer_i(wb_offer), .wb_live_i(wb_live), .wb_destination_i(wb_tags),
     .commit_i(commit_offer), .commit_destination_i(commit_tags), .commit_stale_i(commit_stales), .commit_rd_i(commit_rds),
-    .resolve_i(resolve), .resolve_live_i(resolve_live), .mispredict_i(mispredict), .resolve_id_i(resolve_id),
+    .resolve_i(resolve), .resolve_live_i(resolve_live), .mispredict_i(mispredict), .branch_recover_i(recovery), .resolve_id_i(resolve_id),
     .accept_o(accept), .wb_accept_o(wb_accept), .commit_accept_o(commit_accept),
     .destination_o(destination), .stale_o(stale), .source1_o(source1), .source2_o(source2), .source_ready_o(source_ready),
     .allocation_o(allocation), .free_o(free_tags), .ready_o(ready_tags), .rat_o(rat), .committed_o(committed_map),
@@ -83,15 +91,13 @@ module rename_recovery_ownership (
     expected_recover = expected_resolve && mispredict;
     expected_reclaim = 0;
     expected_released = 0;
-    if (expected_resolve) begin
-      expected_released[resolve_id] = 1;
-      for (int n = 0; n < 4; n++) begin
-        if (n < count && expected_recover) begin
+    if (expected_resolve && !mispredict) expected_released[resolve_id] = 1;
+    if (recovery)
+      for (int n = 0; n < 4; n++)
+        if (n < count) begin
           if (n > boundary && entries[n].rd != 0) expected_reclaim[entries[n].tag] = 1;
           if (n >= boundary && entries[n].branch) expected_released[entries[n].slot] = 1;
         end
-      end
-    end
 
     wb_tags = stale_wb_tags;
     if (wb_live[0]) wb_tags[5:0] = 3'(wb_index0) < count ? entries[wb_index0].tag : 6'd0;
@@ -99,9 +105,8 @@ module rename_recovery_ownership (
     ready_view = expected_ready;
     expected_wb = 0;
     for (int lane = 0; lane < 2; lane++) begin
-      if (!rst && !recover && wb_offer[lane] && wb_live[lane] && wb_tags[lane*6 +: 6] != 0
-          && owned[wb_tags[lane*6 +: 6]] && !ready_view[wb_tags[lane*6 +: 6]]
-          && !expected_reclaim[wb_tags[lane*6 +: 6]]) begin
+      if (!rst && wb_offer[lane] && wb_live[lane] && wb_tags[lane*6 +: 6] != 0
+          && owned[wb_tags[lane*6 +: 6]] && !ready_view[wb_tags[lane*6 +: 6]]) begin
         expected_wb[lane] = 1;
         ready_view[wb_tags[lane*6 +: 6]] = 1;
       end
@@ -112,7 +117,7 @@ module rename_recovery_ownership (
     commit_stales = 0;
     commit_rds = 0;
     for (int lane = 0; lane < 2; lane++) begin
-      if (lane < count && retire_request[lane] && (lane == 0 || commit_offer[0])
+      if (!rst && !recover && !held && lane < count && retire_request[lane] && (lane == 0 || commit_offer[0])
           && !entries[lane].branch && (entries[lane].rd == 0 || ready_view[entries[lane].tag])) begin
         commit_offer[lane] = 1;
         commit_tags[lane*6 +: 6] = entries[lane].tag;
@@ -120,12 +125,12 @@ module rename_recovery_ownership (
         commit_rds[lane*5 +: 5] = entries[lane].rd;
       end
     end
-    expected_commit = rst || recover || expected_recover ? 2'b00 : commit_offer;
+    expected_commit = commit_offer;
     retire_count = int'(expected_commit[0]) + int'(expected_commit[1]);
     selected_count = !valid[0] ? 0 : valid[1] && !checkpoint[0] ? 2 : 1;
     room = int'(count) + selected_count <= 4;
     expected_accept = 0;
-    if (!rst && !recover && !expected_recover && resources && room && valid != 2'b10)
+    if (!rst && !recover && !held && resources && room && valid != 2'b10)
       expected_accept = selected_count == 2 ? 2'b11 : selected_count == 1 ? 2'b01 : 2'b00;
     expected_create = |(expected_accept & checkpoint);
     expected_slot = 0;
@@ -139,6 +144,7 @@ module rename_recovery_ownership (
     expected_source_ready = 0;
     expected_allocation = 0;
     available = ~owned & 64'h0000000f0000000e;
+    planner_view = expected_ready;
     walk = map;
     for (int lane = 0; lane < 2; lane++) begin
       added[lane] = '0;
@@ -149,14 +155,15 @@ module rename_recovery_ownership (
         added[lane].slot = expected_slot;
         expected_source1[lane*6 +: 6] = walk[rs1s[lane*5 +: 5]*6 +: 6];
         expected_source2[lane*6 +: 6] = walk[rs2s[lane*5 +: 5]*6 +: 6];
-        expected_source_ready[lane*2] = ready_view[expected_source1[lane*6 +: 6]];
-        expected_source_ready[lane*2+1] = ready_view[expected_source2[lane*6 +: 6]];
+        expected_source_ready[lane*2] = planner_view[expected_source1[lane*6 +: 6]];
+        expected_source_ready[lane*2+1] = planner_view[expected_source2[lane*6 +: 6]];
         if (added[lane].rd != 0) begin
           for (int tag = 63; tag >= 1; tag--)
             if (available[tag]) added[lane].tag = 6'(tag);
           added[lane].stale = walk[added[lane].rd*6 +: 6];
           available[added[lane].tag] = 0;
           ready_view[added[lane].tag] = 0;
+          planner_view[added[lane].tag] = 0;
           walk[added[lane].rd*6 +: 6] = added[lane].tag;
           expected_allocation[added[lane].tag] = 1;
         end
@@ -168,14 +175,15 @@ module rename_recovery_ownership (
     next_committed = committed;
     next_count = count;
     add_count = int'(expected_accept[0]) + int'(expected_accept[1]);
-    keep_count = expected_recover ? boundary+1 : int'(count)-retire_count;
+    keep_count = recovery ? boundary+1 : int'(count)-retire_count;
     for (int n = 0; n < 4; n++) begin
       next_entries[n] = '0;
       if (n < keep_count) begin
         next_entries[n] = entries[n+retire_count];
         for (int lane = 0; lane < 2; lane++)
           if (expected_wb[lane] && next_entries[n].tag == wb_tags[lane*6 +: 6]) next_entries[n].done = 1;
-        if (expected_resolve && next_entries[n].slot == resolve_id) next_entries[n].branch = 0;
+        if (((expected_resolve && !mispredict) || recovery) && next_entries[n].slot == resolve_id)
+          next_entries[n].branch = 0;
       end
       for (int lane = 0; lane < 2; lane++)
         if (expected_accept[lane] && n == keep_count+lane) next_entries[n] = added[lane];
@@ -195,6 +203,13 @@ module rename_recovery_ownership (
   always @(posedge clk) begin
     past_valid <= 1;
     if (!past_valid) assume (rst);
+    // ROB assumptions: stable recovery ID, only surviving writebacks, no rename while held, and no live flush offers.
+    if (recovery) assume (!resolve && resolve_id == recover_id_q
+                          && (!wb_live[0] || int'(wb_index0) <= boundary) && (!wb_live[1] || int'(wb_index1) <= boundary));
+    if (held || recover) assume (!resources);
+    if (recover) assume (!resolve_live && wb_live == 0);
+    recover_q <= !rst && !recover && expected_recover;
+    recover_id_q <= resolve_id;
     count <= next_count;
     committed <= next_committed;
     for (int n = 0; n < 4; n++) entries[n] <= next_entries[n];
@@ -212,12 +227,14 @@ module rename_recovery_ownership (
       source_maps: assert (source1 == expected_source1 && source2 == expected_source2 && source_ready == expected_source_ready);
       writeback_acceptance: assert (wb_accept == expected_wb);
       retirement_acceptance: assert (commit_accept == expected_commit);
-      resolution_acceptance: assert (resolve_accept == expected_resolve && branch_recover == expected_recover);
+      recovery_boundary: assert (!recovery || boundary >= 0);
+      resolution_acceptance: assert (resolve_accept == expected_resolve && branch_recover == recovery);
       recovery_packet: assert (reclaim == expected_reclaim && released == expected_released);
       checkpoint_creation: assert (create == expected_create && create_id == expected_slot);
     end
   end
 
+  // independent checkpoint snapshots and younger ownership histories
   logic [191:0] checkpoint_maps [0:7];
   logic [63:0] checkpoint_tags [0:7];
   logic [7:0] checkpoint_older [0:7];
@@ -245,6 +262,7 @@ module rename_recovery_ownership (
     end
   end
 
+  // prefix ownership relations strengthen induction without relying on DUT state.
   logic [191:0] ledger_maps [0:4];
   logic [63:0] ledger_owners [0:4];
   always_comb begin
@@ -335,8 +353,8 @@ module rename_recovery_ownership (
       surviving_writeback: cover (branch_recover && |wb_accept);
       branch_link_writeback: cover (branch_recover && wb_accept[0] && entries[boundary].rd != 0
                                    && wb_tags[5:0] == entries[boundary].tag);
-      killed_writeback: cover (branch_recover && wb_offer[0] && wb_live[0] && reclaim[wb_tags[5:0]]);
-      recovery_retire_collision: cover (branch_recover && |commit_offer);
+      killed_writeback: cover (branch_recover && wb_offer[0] && !wb_live[0] && reclaim[wb_tags[5:0]]);
+      mispredict_accept: cover (resolve_accept && mispredict && |wb_accept);
       correct_resolve_create: cover (resolve_accept && !mispredict && create);
       retired_tag_reuse: cover (saw_retire && |(allocation & retired_stales));
       killed_tag_reuse: cover (saw_recover && |(allocation & killed_tags));

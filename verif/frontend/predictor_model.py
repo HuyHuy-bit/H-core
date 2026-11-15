@@ -81,6 +81,7 @@ class SmallTage:
         tags = tuple((word ^ (word >> 8) ^ fold(h, 8) ^ (fold(h, 7) << 1)) & 255 for h in histories)
         return indices, tags
 
+    # longest matching history selects the provider and alternate prediction.
     def lookup(self, pc):
         indices, tags = self.addresses(pc)
         hits = [bank for bank in range(4) if self.tables[bank][indices[bank]].valid
@@ -132,6 +133,7 @@ class SmallTage:
                 for entry in candidates:
                     entry.useful = max(0, entry.useful - 1)
 
+        # periodic usefulness aging precedes the committed history update.
         self.age = (self.age + 1) & ((1 << self.age_bits) - 1)
         if self.age == 0:
             for table in self.tables:

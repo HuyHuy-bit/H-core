@@ -15,15 +15,21 @@ struct Desc {
     unsigned id=0, kind=0, size=0, cause=0;
     uint32_t address=0, raw=0;
     bool unsign=false;
+
     bool store() const { return kind>=2; }
+
     bool uncached() const { return kind==1 || kind==3; }
+
     unsigned client() const { return !store() ? 0 : (uncached() || cause) ? 2:1; }
+
     unsigned mask() const { return cause ? 0:((1U<<(1U<<size))-1)<<(address%4); }
+
     uint32_t bytes() const {
         uint32_t bits=size==0 ? 255U:size==1 ? 65535U:0xffffffffU;
         return store() && !cause ? (raw&bits)<<(8*(address%4)):0;
     }
 };
+
 struct Bench {
     Vmemory_transaction_path d;
     std::mt19937 rng;
@@ -35,19 +41,23 @@ struct Bench {
     unsigned expected_cause=0, cycles=0, cases=0;
     uint32_t expected_data=0;
     std::map<std::string,unsigned> count;
+
     explicit Bench(unsigned seed):rng(seed) {
         for (auto& b:memory) b=uint8_t(rng());
         controls(); reset();
     }
+
     void require(bool ok,const std::string& why) const {
         if (!ok) throw std::runtime_error("memory path mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     void controls() {
         d.clk_i=0; d.rst_i=0; d.recovery_i=0; d.kill_i=0; d.desc_valid_i=0;
         d.commit_i=0; d.take_i=0; d.head_valid_i=0; d.issue_allowed_i=0;
         d.admit_valid_i=0; d.request_ready_i=0; d.response_valid_i=0;
         for (unsigned n=0;n<(RESPONSE_BITS+31)/32;++n) d.response_i[n]=0;
     }
+
     void descriptor(Desc s) {
         d.id_i=s.id; d.address_i=s.address; d.size_i=s.size; d.store_i=s.store();
         d.unsigned_i=s.unsign; d.uncached_i=s.uncached() && !s.cause;
@@ -55,14 +65,18 @@ struct Bench {
         d.fault_i=bool(s.cause); d.cause_i=s.cause; d.trap_value_i=s.cause ? s.address:0;
         d.byte_mask_i=s.mask(); d.write_data_i=s.bytes();
     }
+
     Desc make(unsigned kind,unsigned size=2,unsigned cause=0) {
         Desc s; s.id=rng()%8192; s.kind=kind; s.size=size; s.cause=cause;
         s.address=(0x1000U+(rng()%256))&~((1U<<size)-1);
         s.raw=rng(); s.unsign=!s.store() && size<2 && rng()%2;
         return s;
     }
+
     void head(bool enable=true) { d.head_valid_i=enable; d.head_id_i=held.id; }
+
     void idle_inputs() { controls(); descriptor(make(rng()%4,rng()%3)); }
+
     void tick() {
         d.clk_i=0; d.eval();
         if (d.rst_i) {
@@ -117,6 +131,7 @@ struct Bench {
         }
         Verilated::timeInc(1); d.clk_i=1; d.eval(); d.clk_i=0; Verilated::timeInc(1); ++cycles;
     }
+
     void reset(unsigned collision=0) {
         controls(); d.rst_i=1;
         d.head_valid_i=1; d.head_id_i=held.id;
@@ -130,9 +145,11 @@ struct Bench {
         expected_cause=0; expected_data=0; ++count["reset"];
         tick(); require(!d.busy_o && !d.fatal_o,"reset release");
     }
+
     void idle() {
         controls(); tick(); require(!d.busy_o,"drained");
     }
+
     void start(Desc s) {
         held=s; idle_inputs(); descriptor(s); d.desc_valid_i=1; d.eval();
         require(!d.busy_o,"start capacity");
@@ -163,6 +180,7 @@ struct Bench {
         tick(); require(!d.desc_take_o,"next descriptor blocked");
         idle_inputs();
     }
+
     void blocked() {
         require(owned && !offered,"blocked setup");
         if (result || committed) return;
@@ -175,6 +193,7 @@ struct Bench {
         d.issue_allowed_i=1; d.recovery_i=1; tick(); require(!d.request_valid_o,"reservation recovery");
         d.recovery_i=0; ++count["head_blocks"];
     }
+
     void offer(bool immediate=false) {
         head(); d.issue_allowed_i=1; d.request_ready_i=immediate;
         for (unsigned n=0;n<8;++n) {
@@ -183,6 +202,7 @@ struct Bench {
         }
         require(false,"request watchdog");
     }
+
     void accept_request(unsigned stall=2,bool recover=false) {
         for (unsigned n=0;n<stall;++n) {
             idle_inputs(); d.recovery_i=recover; d.kill_i=recover && committed;
@@ -190,6 +210,7 @@ struct Bench {
         }
         d.request_ready_i=1; tick(); require(sent,"request acceptance"); idle_inputs();
     }
+
     void respond(unsigned status=0,unsigned bad=0) {
         for (unsigned n=0;n<(RESPONSE_BITS+31)/32;++n) d.response_i[n]=0;
         put(d.response_i,RESPONSE_TRANSACTION_ID_OFFSET,4,ids[held.client()]^(bad==1 ? 1:0));
@@ -221,6 +242,7 @@ struct Bench {
         if (committed || killed) { owned=false; result=false; committed=false; }
         else result=true;
     }
+
     void finish(unsigned stalls=2) {
         require(result,"finish result setup"); idle_inputs(); head(); d.issue_allowed_i=1;
         for (unsigned n=0;n<stalls;++n) { tick(); require(d.valid_o,"result held"); ++count["result_stall"]; }
@@ -228,6 +250,7 @@ struct Bench {
         head(false); tick(); require(!d.valid_o,"result head valid"); head();
         d.take_i=1; d.recovery_i=1; tick(); owned=result=false; ++count["takes"]; idle();
     }
+
     void fatal_hold() {
         d.eval();
         unsigned owner=d.owner_id_o, valid=d.owner_valid_o, irrev=d.irrevocable_o, cs=d.committed_o;
@@ -239,6 +262,7 @@ struct Bench {
                 && d.committed_o==cs,"frozen fatal ownership"); ++count["fatal_hold"];
         }
     }
+
     void normal(Desc s,unsigned status=0,unsigned stalls=2) {
         start(s);
         if (!s.cause) {
@@ -251,6 +275,7 @@ struct Bench {
         } else ++count["local_fault"];
         if (owned) finish(stalls+1); else idle();
     }
+
     void cancel_case(unsigned phase) {
         auto s=make(0); start(s); blocked();
         if (phase>=1) offer();
@@ -271,6 +296,7 @@ struct Bench {
         }
         ++count["kill_"+std::to_string(phase)];
     }
+
     void unexpected(unsigned phase,unsigned kind) {
         reset();
         if (phase) {
@@ -290,6 +316,7 @@ struct Bench {
         require(d.fatal_sources_o==8 && d.fatal_reason_o==64,"arbiter-only diagnostics");
         ++count["unexpected_"+std::to_string(phase)]; reset();
     }
+
     void directed() {
         for (unsigned kind=0;kind<4;++kind) for (unsigned size=0;size<3;++size) {
             normal(make(kind,size));
@@ -331,6 +358,7 @@ struct Bench {
         }
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

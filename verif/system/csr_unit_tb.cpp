@@ -9,10 +9,12 @@
 #include <string>
 
 #include "../common/csr_reference.hpp"
+
 struct Input : Command {
     bool reset=false, cancel=false, request=false, ready=false;
     unsigned retired=0;
 };
+
 struct Bench : CsrModel {
     Vcsr_unit dut;
     std::map<std::string, uint64_t> coverage;
@@ -23,13 +25,16 @@ struct Bench : CsrModel {
         std::cerr << "CSR two-wide mismatch cycle=" << cycles << " " << message << '\n';
         std::exit(1);
     }
+
     void check(bool value, const std::string& message) const { if (!value) fail(message); }
+
     uint32_t bits(unsigned offset, unsigned width) const {
         uint32_t result=0;
         for (unsigned b=0;b<width;b++)
             result |= ((dut.effects_o[(offset+b)/32] >> ((offset+b)%32))&1u) << b;
         return result;
     }
+
     void tick(const Input& in={}) {
         dut.clk_i=0; dut.rst_i=in.reset; dut.cancel_i=in.cancel;
         dut.retire_count_i=in.retired; dut.request_valid_i=in.request; dut.response_ready_i=in.ready;
@@ -73,6 +78,7 @@ struct Bench : CsrModel {
         }
         dut.clk_i=1; dut.eval(); dut.clk_i=0; dut.eval(); cycles++;
     }
+
     void command(Input in, unsigned stalls=0, bool cancel=false, bool reset=false) {
         check(!pending,"test starts command while busy");
         in.request=true; tick(in);
@@ -83,13 +89,16 @@ struct Bench : CsrModel {
         }
         Input done; done.ready=true; done.cancel=cancel; done.reset=reset; tick(done);
     }
+
     void write(unsigned addr,uint32_t value) {
         Input in; in.instruction=csr(addr,1,1,0); in.source=value; command(in);
     }
+
     void audit() {
         for (const auto& c:CSR_SPEC) { Input in; in.instruction=csr(c.address); command(in,1,true); }
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     const std::string arg=argc>1?argv[1]:"1";

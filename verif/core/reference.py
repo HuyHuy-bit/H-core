@@ -13,6 +13,7 @@ def signed(value, bits=32):
     return (value ^ (1 << (bits-1))) - (1 << (bits-1))
 
 
+# decode packed architectural events and validate inactive fields
 def unpack_event(words):
     layout = json.loads((ROOT / 'config/commit_event.yaml').read_text())
     packed = sum(int(word, 16) << (32*i) for i, word in enumerate(words))
@@ -20,6 +21,7 @@ def unpack_event(words):
     scalar_bits = sum(f['width'] for f in layout['slot_fields'])
     event_bits = scalar_bits + 4*csr_bits
     assert packed >> event_bits == 0, 'inactive slot is not zero'
+
     def fields(value, definitions):
         result = {}
         for field in reversed(definitions):
@@ -74,6 +76,7 @@ class Reference:
                     write_mask=mask, mask_reason=reason)
 
     def step(self):
+        # instruction fetch, legality and source operands
         fetch_fault = not 0 <= self.pc < 65536 or (self.mode == 'fetch_fault' and self.pc & ~31 == 0x300)
         ins = 0 if fetch_fault else self.read(self.pc, 4)
         opcode, f3, f7 = ins & 127, (ins >> 12) & 7, ins >> 25
@@ -96,6 +99,8 @@ class Reference:
         event = dict(valid=1, order=self.order, instruction=ins, privilege=3, pc_before=self.pc,
                      pc_after=(self.pc+4)&MASK, rs1_addr=source1, rs1_value=a, rs2_addr=source2, rs2_value=b,
                      retired=1, csr_effects=[])
+
+        # instruction execution and architectural side-effect proposal
         value = None
         trap = None
         if fetch_fault: trap = (1, self.pc)
@@ -167,6 +172,8 @@ class Reference:
                 event['pc_after'] = self.csrs[0x341]
                 status = (self.csrs[0x300] & ~0x88) | 0x80 | ((self.csrs[0x300] >> 4) & 8)
                 event['csr_effects'] = [self.effect(0x300, status, 0x88, 3)]
+
+        # trap entry or destination writeback
         if trap:
             cause, tval = trap
             event.update(trap=1, retired=0, trap_cause=cause, trap_value=tval, pc_after=self.csrs[0x305])
@@ -176,6 +183,8 @@ class Reference:
         elif value is not None and rd:
             self.registers[rd] = value & MASK
             event.update(rd_addr=rd, rd_value=value & MASK, rd_write_mask=MASK)
+
+        # retirement counters and accepted CSR effects
         inhibit = self.csrs[0x320] & 4
         explicit_instret = any(e['address'] in (0xb02, 0xb82) and e['write_mask'] for e in event['csr_effects'])
         if event['retired'] and not inhibit and not explicit_instret:

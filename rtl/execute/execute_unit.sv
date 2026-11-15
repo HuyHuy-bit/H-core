@@ -1,18 +1,18 @@
 `default_nettype none
 // combinational rv32i execute: alu result, next pc, branch direction, memory address and trap cause.
 module execute_unit (
-  // inputs
   input  core_pkg::decoded_t decoded_i,
   input  wire [31:0] pc_i, instruction_i, source1_i, source2_i, csr_value_i, mepc_i,
   input  wire csr_legal_i,
 
-  // outputs
   output logic [31:0] result_o, next_pc_o, address_o,
   output logic trap_o, taken_o,
   output logic [31:0] cause_o, trap_value_o
 );
+
   import core_pkg::*;
   import platform_pkg::*;
+
   logic [31:0] operand2;
 
   // operand selection and execution

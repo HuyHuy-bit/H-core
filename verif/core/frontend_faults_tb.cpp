@@ -12,13 +12,16 @@ static void until_fault(Bench& b,std::mt19937& rng) {
     }
     b.require(false,"fault progress watchdog");
 }
+
 static void restart(Bench& b,uint32_t target) {
     Input i; i.flush=true; i.target=target; b.tick(i);
 }
+
 static void init(Bench& b) {
     b.memory.fill(0x10500073);
     for (unsigned n=0;n<31;++n) b.memory[n]=instruction(2,n+1,0,0,n*11+5);
 }
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {
@@ -58,7 +61,7 @@ int main(int argc,char** argv) {
             b.coverage["bus_offset_"+std::to_string(offset)]++;
         }
         b.error_address=UINT32_MAX;
-        // An older unresolved jump can squash queued, held and completed younger faults.
+        // stall port zero so an older unresolved jump can squash younger staged, held and completed faults.
         for (uint32_t insn:{0xffffffffU,0x00000073U,0x00100073U}) for (unsigned kind=0;kind<4;++kind) {
             b.memory.fill(instruction(2,0,0,0,0));
             b.memory[0]=instruction(21,0,0,0,0x800); b.memory[0x800/4]=0x10500073;
@@ -67,12 +70,15 @@ int main(int argc,char** argv) {
             b.reset();
             for (unsigned n=0;n<70;++n) {
                 Input i; i.grant=false;
-                if (kind==0) i.execute=1;
+                if (kind<3) i.execute=kind ? 2 : 0;
                 if (kind==1) i.complete=1;
                 b.tick(i);
             }
             b.require(!b.d.backend_fault_o,"younger fault bypassed older branch");
-            b.require(b.d.producer_busy_o==(kind==1 ? 3 : 1),"fault did not reach intended queued/held/completed state");
+            // with every port ready (kind 3) younger work may wait in its stage behind the waiting mispredict.
+            b.require(kind==3 ? (b.d.producer_busy_o&1) : b.d.producer_busy_o==(kind<=1 ? 3 : 1),
+                "fault did not reach intended staged/held/completed state kind="+std::to_string(kind)
+                +" busy="+std::to_string(b.d.producer_busy_o));
             b.require(b.d.occupancy_o>=2,"younger fault was not allocated");
             b.run_to(0x800,rng); b.require(b.d.producer_busy_o==0,"squashed fault still owns producer"); b.coverage["squash_fault_"+std::to_string(kind)]++;
             b.error_address=UINT32_MAX;

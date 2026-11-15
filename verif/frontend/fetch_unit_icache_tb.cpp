@@ -1,7 +1,4 @@
-// Fetch with the instruction cache (ICACHE=1, PREDICT=1, AHEAD=1, TAGE=1), driven as a memory target: every
-// delivered lane is scored against the memory image, the instruction port is checked against the protocol and
-// fence.i's hold, and an invalidate changes the image, as a cleaned store does. Directed runs time a redirect hit,
-// a resident straight-line run and redirects racing a prefetch.
+// score cached predicted fetch against memory while checking redirects, prefetch races and FENCE.I ordering.
 #include "../common/packed_bits.hpp"
 using packed_bits::put;
 using packed_bits::get32;
@@ -16,14 +13,16 @@ using packed_bits::get32;
 #include <stdexcept>
 #include <string>
 
-#define CACHE(name) d.rootp->fetch_unit__DOT__icache__DOT__cache__DOT__##name
+#define CACHE(name) d.rootp->fetch_unit__DOT__cached__DOT__cache__DOT__##name
 
 // Words carry no control flow, so fetch runs sequentially and the predictor stays silent; each epoch changes them all.
 static uint32_t word(uint32_t address, unsigned epoch) {
     const uint32_t h=(address*0x9e3779b9U) ^ (epoch*0x85ebca6bU) ^ 0x2545f491U;
     return (h & ~0x7fU) | 0x13U;
 }
+
 static bool faulty(uint32_t line) { return line%23==7; }   // lines the target answers with an access fault
+
 static bool executable(uint32_t pc) { return pc<65536; }
 
 struct Input {
@@ -31,6 +30,7 @@ struct Input {
     uint32_t target=0;
     unsigned take=0;                  // a lane mask: the bench takes this prefix of what fetch offers
 };
+
 struct Bench {
     Vfetch_unit d;
     unsigned cycles=0, epoch=0, min_epoch=0, latency=1, id=0, idle=0;
@@ -42,9 +42,11 @@ struct Bench {
     unsigned valid=0, requests=0;
     std::map<uint32_t, unsigned> line_requests;
     std::map<std::string, unsigned> coverage;
+
     void require(bool good, const std::string& message) const {
         if (!good) throw std::runtime_error("fetch icache mismatch cycle="+std::to_string(cycles)+": "+message);
     }
+
     void tick(Input i={}) {
         const bool respond=!i.reset && pending && cycles>=response_cycle;
         d.clk_i=0; d.rst_i=i.reset; d.enable_i=i.enable; d.redirect_i=i.redirect; d.redirect_pc_i=i.target;
@@ -161,7 +163,9 @@ struct Bench {
         }
         if (i.invalidate && pending) coverage["invalidate_in_flight"]++;
     }
+
     void reset() { Input i; i.reset=true; tick(i); line_requests.clear(); }
+
     void redirect(uint32_t target) { Input i; i.redirect=true; i.target=target; tick(i); }
     // run with every offered lane taken until the demanded pc reaches end
     void fetch_until(uint32_t end) {
@@ -193,6 +197,7 @@ static unsigned hit_bubbles(Bench& b, uint32_t target) {
     for (b.tick(); !b.valid; b.tick()) b.require(++bubbles<20, "redirect hit progress");
     return bubbles;
 }
+
 static unsigned directed(Bench& b) {
     b.reset();
     b.latency=3;
@@ -220,8 +225,7 @@ static unsigned directed(Bench& b) {
     b.require(gaps==0, "sequential crossing gap: "+std::to_string(gaps));
     b.require(lookups==1 && reads<=9, "cache reads per line: "+std::to_string(reads));
     b.coverage["sequential_crossing_no_bubble"]++;
-    // redirect_during_prefetch: in the offer cycle, its read, its check and with the ahead line filled; the
-    // redirect target's next line is missing
+    // redirect during prefetch offer, read, check and completed fill, with the target next line absent.
     const char* phases[]={"offer", "read", "check", "filled"};
     for (unsigned phase=0; phase<4; ++phase) {
         b.quiesce();
@@ -251,8 +255,7 @@ static unsigned directed(Bench& b) {
         b.coverage[target==0x2020 ? "redirect_to_filling_line" : "redirect_during_prefetch_miss"]++;
         b.latency=3;
     }
-    // a check cancelled by the redirect in its offer or read cycle is neither read nor requested; fetch is
-    // disabled after the redirect, so no lookup takes the read port in its place
+    // disable fetch after redirect to expose a cancelled prefetch check that incorrectly reaches the read port.
     for (unsigned phase=0; phase<2; ++phase) {
         b.quiesce();
         { Input i; i.enable=false; i.invalidate=true; i.redirect=true; i.target=0x2000; b.tick(i); }
@@ -312,6 +315,7 @@ static unsigned directed(Bench& b) {
     b.reset();
     return bubbles;
 }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     try {

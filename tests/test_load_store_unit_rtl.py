@@ -25,8 +25,7 @@ class LoadStoreUnitRtlTest(unittest.TestCase):
         self.run_bench("early_load_core", "load_store_unit_tb")
 
     def test_dcache_squashed_loads(self):
-        # response_same_cycle_as_recovery, zombie_response_after_slot_reuse,
-        # identity_recycle_with_dcache_miss_outstanding and a flush under a miss.
+        # cover response/recovery races, stale slot reuse, identity recycling and flush under a cache miss.
         self.run_bench("cached_core", "load_store_unit_dcache_tb")
 
 

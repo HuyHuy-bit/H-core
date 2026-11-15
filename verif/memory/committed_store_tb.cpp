@@ -13,12 +13,14 @@
 using packed_bits::put;
 
 struct Store { unsigned id=0, size=0, mask=1; uint32_t address=0, data=0; };
+
 struct Input {
     Store desc;
     bool reset=false, recovery=false, candidate=true, store=true, fault=false, uncached=false;
     bool head=true, admit=true, commit=false, request_ready=false, response=false;
     unsigned head_id=0, admit_id=0, response_id=0, status=0, payload=0, payload_bit=0;
 };
+
 struct Bench {
     Vcommitted_store d;
     std::mt19937 rng;
@@ -29,10 +31,13 @@ struct Bench {
     std::bitset<4> response_id_bits;
     std::bitset<256> line_payload_bits;
     std::bitset<32> word_payload_bits;
+
     explicit Bench(unsigned seed): rng(seed) {}
+
     void require(bool good, const std::string& why) const {
         if (!good) throw std::runtime_error("committed store mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     Store make(unsigned id, unsigned size, uint32_t address) {
         Store s{id,size,0,address,0};
         uint32_t raw=rng();
@@ -43,9 +48,11 @@ struct Bench {
         }
         return s;
     }
+
     Input input(Store s) {
         Input i; i.desc=s; i.head_id=i.admit_id=s.id; i.response_id=transaction; return i;
     }
+
     Input noise() {
         Input i;
         i.desc={unsigned(rng()%8192),unsigned(rng()%4),unsigned(rng()%16),uint32_t(rng()),uint32_t(rng())};
@@ -54,6 +61,7 @@ struct Bench {
         i.recovery=rng()%2; i.head=rng()%2; i.admit=rng()%2; i.response_id=transaction;
         return i;
     }
+
     void step(Input i) {
         d.clk_i=0; d.rst_i=i.reset; d.recovery_i=i.recovery;
         d.desc_valid_i=i.candidate; d.store_i=i.store; d.fault_i=i.fault; d.uncached_i=i.uncached;
@@ -115,7 +123,9 @@ struct Bench {
             }
         }
     }
+
     void reset() { Input i; i.reset=true; step(i); step(noise()); }
+
     void qualifiers(Store s) {
         auto base=input(s);
         for (unsigned k=0;k<8;++k) {
@@ -137,7 +147,9 @@ struct Bench {
         }
         for (unsigned n=0;n<5;++n) { step(base); ++count["ready_without_commit"]; }
     }
+
     void commit(Store s) { auto i=input(s); i.commit=true; step(i); ++cases; }
+
     void run(Store s, bool fast, bool permission) {
         commit(s);
         unsigned stalls=fast ? 0:1+rng()%5;
@@ -156,6 +168,7 @@ struct Bench {
         ++count["size_"+std::to_string(s.size)]; ++count["offset_"+std::to_string(s.address%32)];
         step(noise());
     }
+
     void protocol(unsigned kind, unsigned bit=0) {
         reset(); Store s=make(8191,0,31); auto i=input(s);
         if (kind!=0) commit(s);
@@ -175,6 +188,7 @@ struct Bench {
         for (unsigned n=0;n<3;++n) { auto j=noise(); j.request_ready=j.response=true; j.status=3; step(j); ++count["fatal_hold"]; }
         ++count["bad_"+std::to_string(kind)]; reset();
     }
+
     void reset_phases() {
         for (unsigned phase=0;phase<3;++phase) {
             reset(); auto s=make(33,2,28);
@@ -183,6 +197,7 @@ struct Bench {
             reset(); ++count["reset_phase_"+std::to_string(phase)];
         }
     }
+
     void negative(const std::string& name) {
         reset(); auto s=make(7,2,28); auto i=input(s); i.commit=true;
         if (name=="no-admission") i.admit=false;
@@ -201,6 +216,7 @@ struct Bench {
         throw std::runtime_error("caller violation survived");
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

@@ -3,6 +3,7 @@
 module load_store_unit_tb;
   import memory_protocol_pkg::*;
   import commit_event_pkg::*;
+
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
   logic [1:0] allocate_valid = 0, allocate_memory = 0, allocate_store = 0, allocate = 0;
@@ -24,11 +25,11 @@ module load_store_unit_tb;
   assign unused_request = '0;
   load_store_unit dut (
     .clk_i(clk), .rst_i(rst), .flush_i(1'b0), .recover_i(1'b0), .recover_slot_i(5'd0),
-    .head_valid_i(1'b1), .head_id_i(13'd0),
+    .head_valid_i(1'b1), .head_id_i(13'd0), .head_step_i(2'b00),
     .allocate_valid_i(allocate_valid), .allocate_memory_i(allocate_memory), .allocate_store_i(allocate_store),
     .allocate_ready_o(allocate_ready), .allocate_i(allocate), .allocate_id_i({13'd0, allocate_id}),
     .allocate_instruction_i(allocate_instruction), .allocate_pc_i(PC), .allocate_sources_i(12'd2),
-    .issue_i(issue), .issue_id_i(issue_id), .issue_instruction_i(issue_instruction), .issue_pc_i(PC),
+    .issue_i(issue), .issue_id_i(issue_id), .issue_destination_i(6'd0), .complete_destination_o(), .issue_instruction_i(issue_instruction), .issue_pc_i(PC),
     .source1_i(base), .source2_i(store_data), .retire_i(1'b0), .clean_i(1'b0),
     .head_memory_o(head_memory), .head_instruction_o(head_instruction),
     .head_sources_o(head_sources), .issue_allowed_i(issue_allowed),

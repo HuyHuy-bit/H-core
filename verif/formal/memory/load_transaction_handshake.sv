@@ -10,6 +10,7 @@ module load_transaction_handshake (
   input wire [31:0] uncached_data
 );
   import memory_protocol_pkg::*;
+
   wire ready, request_valid, response_ready, valid, irrevocable, fatal;
   mem_request_t request;
   mem_response_t response;

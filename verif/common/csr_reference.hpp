@@ -10,30 +10,39 @@
 // misa reports M (bit 12) when the core is built with M_EXTENSION.
 constexpr uint32_t misa_m(unsigned address) { return TB_M_EXTENSION && address == 0x301 ? 0x1000U : 0U; }
 using Effect = std::array<uint32_t, 7>;
+
 struct Reply {
     bool legal=false, read=false, trap=false;
     uint32_t value=0, next=0;
     std::array<Effect, 4> effects{};
 };
+
 struct Command {
     bool trap=false;
     uint32_t instruction=0, source=0, pc=0, cause=0, value=0;
 };
+
 inline uint32_t csr(unsigned address,unsigned kind=2,unsigned source=0,unsigned dest=1) {
     return address<<20 | source<<15 | kind<<12 | dest<<7 | 0x73;
 }
+
 struct CsrModel {
     std::map<unsigned,uint32_t> state;
     CsrModel() { reset_state(); }
+
     void reset_state() { state.clear(); for (const auto& c : CSR_SPEC) state[c.address]=c.reset | misa_m(c.address); }
+
     const Spec* spec(unsigned address) const {
         for (const auto& c : CSR_SPEC) if (c.address == address) return &c;
         return nullptr;
     }
+
     Effect effect(unsigned address, uint32_t data, uint32_t mask, unsigned reason) const {
         const auto& c=*spec(address);
         return {1, address, state.at(address), data, c.write_mask | c.fixed_mask, mask, reason};
     }
+
+    // propose CSR effects without changing state; acceptance applies them in advance().
     Reply propose(const Command& in) const {
         Reply out;
         out.next=in.pc;
@@ -74,6 +83,7 @@ struct CsrModel {
         out.effects[0]=effect(c->address,write ? data : old,write ? c->write_mask : 0,1);
         return out;
     }
+
     void advance(bool reset,unsigned ordinary,const Reply* accepted,
                  std::map<std::string,uint64_t>* coverage=nullptr) {
         if (reset) { reset_state(); return; }

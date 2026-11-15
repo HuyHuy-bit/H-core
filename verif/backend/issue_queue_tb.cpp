@@ -18,13 +18,17 @@ struct Op {
     std::array<bool, 2> ready{false, false};
     bool queued = true;
 };
+
 struct Input {
     std::vector<Op> dispatch;
     unsigned ports = 3, accepted = 0;
     std::array<unsigned, 2> wb{0, 0};
-    bool reset = false, flush = false, recover = false, hold_retire = false;
+    bool reset = false, flush = false, recover = false, hold_retire = false, hold = false;
     uint64_t cut = 0;
+    unsigned early_valid = 0;  // results held in registers: their consumers may issue now
+    std::array<unsigned, 6> early{};
 };
+
 class Check {
     uint64_t tail = 0, payload_sequence = 1;
     std::array<unsigned, 32> generations{};
@@ -34,22 +38,29 @@ public:
     std::deque<Op> live;
     std::map<std::string, unsigned> coverage;
     unsigned cycles = 0;
+
     void require(bool ok, const std::string& what) const {
         if (!ok) throw std::runtime_error("issue queue mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     unsigned occupancy() const {
         return unsigned(std::count_if(live.begin(), live.end(), [](const Op& e) { return e.queued; }));
     }
+
     void step(Input in = {}) {
         ++cycles;
         const unsigned count = occupancy();
-        const bool stop = in.reset || in.flush || in.recover;
+        // the caller holds the queue in every flush and recovery cycle, and may hold it in others
+        const bool stop = in.reset || in.flush || in.recover || in.hold;
         require(stop || (in.dispatch.size() <= 2 && count+in.dispatch.size() <= 16
                 && live.size()+in.dispatch.size() <= 32), "invalid reference dispatch");
         require(!in.recover || std::any_of(live.begin(), live.end(), [&](const Op& e) { return e.position == in.cut; }),
                 "invalid reference recovery");
         const auto head = live.empty() ? tail : live.front().position;
         dut.clk_i = 0; dut.rst_i = in.reset; dut.flush_i = in.flush; dut.recover_i = in.recover;
+        dut.hold_i = in.flush || in.recover || in.hold;
+        dut.early_valid_i = in.early_valid; dut.early_destination_i = 0;
+        for (unsigned port = 0; port < 6; ++port) dut.early_destination_i |= uint64_t(in.early[port]) << (6*port);
         dut.head_slot_i = head%32; dut.recover_slot_i = in.cut%32;
         dut.dispatch_i = (1U << in.dispatch.size())-1;
         dut.dispatch_id_i = 0; dut.dispatch_source_i = 0; dut.dispatch_ready_i = 0;
@@ -76,10 +87,10 @@ public:
         require(dut.occupancy_o == count, "occupancy");
         require(dut.dispatch_ready_o == (stop ? 0U : unsigned(count < 16) | (unsigned(count < 15) << 1)), "credits");
 
-        // The oracle keeps program order, never the DUT's sparse slots or modular age comparison.
+        // the oracle selects in program order independently of DUT storage slots.
         std::array<int, 2> selected{-1, -1};
         bool any_wake = false, same_cycle_issue = false;
-        std::vector<std::array<bool, 2>> readiness;
+        std::vector<std::array<bool, 2>> readiness, issuable;
         for (const auto& e : live) {
             auto r = e.ready;
             for (unsigned operand = 0; operand < 2; ++operand) {
@@ -90,12 +101,17 @@ public:
             }
             any_wake |= e.queued && r != e.ready;
             readiness.push_back(r);
+            auto now = r;
+            for (unsigned operand = 0; operand < 2; ++operand)
+                for (unsigned port = 0; port < 6; ++port)
+                    now[operand] = now[operand] || ((in.early_valid >> port & 1) && in.early[port] == e.source[operand]);
+            issuable.push_back(now);
         }
         for (unsigned port = 0; port < 2; ++port) {
             if (!stop && (in.ports & (1U << port))) {
                 for (unsigned n = 0; n < live.size(); ++n) {
                     const auto& e = live[n];
-                    if (e.queued && readiness[n][0] && readiness[n][1] && (e.eligible & (1U << port))
+                    if (e.queued && issuable[n][0] && issuable[n][1] && (e.eligible & (1U << port))
                             && (port == 0 || selected[0] != int(n))) { selected[port] = int(n); break; }
                 }
             }
@@ -109,6 +125,8 @@ public:
             require(actual == (issued ? expected.payload : 0), "payload");
             if (issued) {
                 same_cycle_issue |= readiness[unsigned(selected[port])] != expected.ready;
+                const auto& r = readiness[unsigned(selected[port])];
+                if (!(r[0] && r[1])) ++coverage["early_issue"];
                 if (expected.source[0] == 0 || expected.source[1] == 0) ++coverage["zero_source"];
                 if (expected.source[0] == expected.source[1] && expected.source[0] != 0) ++coverage["same_source"];
                 if (expected.eligible == 1) ++coverage["port0_only"];
@@ -149,13 +167,17 @@ public:
                 tail = in.cut+1;
             } else {
                 for (auto n : selected) if (n >= 0) live[unsigned(n)].queued = false;
-                for (auto e : in.dispatch) { ++generations[e.position%32]; live.push_back(e); }
-                tail += in.dispatch.size();
+                if (!stop) {
+                    for (auto e : in.dispatch) { ++generations[e.position%32]; live.push_back(e); }
+                    tail += in.dispatch.size();
+                }
             }
             if (!in.hold_retire) while (!live.empty() && !live.front().queued) live.pop_front();
         }
     }
+
     void clear(bool reset = false) { Input i; i.flush = !reset; i.reset = reset; step(i); }
+
     void drain() {
         Input i; i.accepted = 3;
         for (unsigned tag = 1; tag < 64; tag += 2) { i.wb = {tag, tag+1 < 64 ? tag+1 : 0}; step(i); }
@@ -163,9 +185,11 @@ public:
         require(live.empty(), "drain completion");
     }
 };
+
 Op op(unsigned eligible = 3, bool ready = false, unsigned a = 5, unsigned b = 6) {
     Op e; e.eligible = eligible; e.ready = {ready, ready}; e.source = {a, b}; return e;
 }
+
 void directed(Check& c) {
     c.clear(true);
     Input i;
@@ -204,16 +228,24 @@ void directed(Check& c) {
     i = {}; i.recover = true; i.cut = c.live[3].position; i.accepted = 3; i.wb = {5, 6}; c.step(i);
     i.cut = c.live[1].position; i.accepted = 0; c.step(i);
     i = {}; i.ports = 0; i.dispatch = {op(3, true), op(3, true)}; c.step(i); c.drain();
+    i = {}; i.ports = 0; i.dispatch = {op(3, false, 9, 10)}; c.step(i);
+    i = {}; i.early_valid = 0x24; i.early[2] = 9; i.early[5] = 10; c.step(i); c.step();
     i = {}; i.ports = 0; i.dispatch = {op(), op()}; c.step(i); c.clear(); c.step();
     c.step(i); c.clear(true); c.step();
     // Control suppression includes simultaneously offered dispatch, ready ports and broadcasts.
     c.step(i); i.flush = true; i.ports = 3; i.accepted = 3; i.wb = {5, 6}; c.step(i); c.step();
     i.flush = false; i.ports = 0; i.accepted = 0; c.step(i); i.reset = true; i.ports = 3; c.step(i); c.step();
 }
+
 void random_run(Check& c, unsigned seed, unsigned cycles) {
+
     std::mt19937 rng(seed);
     for (unsigned n = 0; n < cycles; ++n) {
-        Input i; i.ports = rng()%4; i.hold_retire = rng()%4 == 0;
+        Input i; i.ports = rng()%4; i.hold_retire = rng()%4 == 0; i.hold = rng()%41 == 0;
+        for (unsigned port = 0; port < 6; ++port) if (rng()%8 == 0) {
+            i.early_valid |= 1U << port;
+            i.early[port] = !c.live.empty() && rng()%2 ? c.live[rng()%c.live.size()].source[rng()%2] : unsigned(rng()%64);
+        }
         i.accepted = rng()%4; i.wb = {unsigned(rng()%64), unsigned(rng()%64)};
         if (i.accepted == 3 && i.wb[0] == i.wb[1]) i.accepted = 1;
         if (n%997 == 996) i.flush = true;
@@ -234,6 +266,7 @@ void random_run(Check& c, unsigned seed, unsigned cycles) {
         c.step(i);
     }
 }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     try {

@@ -25,7 +25,7 @@ public_flat_rd -module "l1_dcache" -var "walk_q"
 // and fetch_unit with l1_icache, for the instruction-cache counters
 inline -module "fetch_unit"
 inline -module "l1_icache"
-public_flat_rd -module "fetch_unit" -var "fill_take"
+public_flat_rd -module "fetch_unit" -var "fill"
 public_flat_rd -module "l1_icache" -var "hit_valid_o"
 public_flat_rd -module "l1_icache" -var "miss_o"
 public_flat_rd -module "l1_icache" -var "prefetch_valid_i"

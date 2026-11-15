@@ -1,16 +1,12 @@
 `default_nettype none
-// issue-port-one address generation and early cacheable, idempotent loads.
-// loads take fully covering older store bytes (queued or committed) and wait for unknown or partial overlaps.
-// stores, uncached loads and faults use the shared rob-head memory path.
-// DCACHE=1: early loads read l1_dcache, whose line traffic shares the data port. Retired cacheable stores queue in
-// the store buffer, which writes them into the cache in order and stays visible to forwarding until each lands.
+// port-one address generation and early loads; stores, uncached accesses and faults use ROB-head service.
 module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
-  // inputs
   input  wire clk_i, rst_i, flush_i,
   input  wire recover_i,
   input  wire [4:0] recover_slot_i,
   input  wire head_valid_i,
   input  wire [12:0] head_id_i,
+  input  wire [1:0] head_step_i,  // retirements accepted this cycle: how far the head moves
   input  wire [1:0] allocate_valid_i, allocate_memory_i, allocate_store_i,
   input  wire [1:0] allocate_i,
   input  wire [25:0] allocate_id_i,
@@ -18,6 +14,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
   input  wire [11:0] allocate_sources_i,
   input  wire issue_i,
   input  wire [12:0] issue_id_i,
+  input  wire [5:0] issue_destination_i,  // the issued instruction's physical destination
   input  wire [31:0] issue_instruction_i, issue_pc_i, source1_i, source2_i,
   input  wire retire_i,
   input  wire issue_allowed_i,
@@ -33,13 +30,13 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
   input  wire response_valid_i,
   input  memory_protocol_pkg::mem_response_t response_i,
 
-  // outputs
   output wire allocate_ready_o,
   output wire head_memory_o,
   output wire [31:0] head_instruction_o,
   output wire [11:0] head_sources_o,
   output wire complete_valid_o,
   output wire [12:0] complete_id_o,
+  output wire [5:0] complete_destination_o,  // from a register, so the result's wakeup needs no lookup by id
   output commit_event_pkg::commit_event_t complete_event_o,
   output wire busy_o, fatal_o,
   output wire store_buffer_full_o, store_buffer_pending_o,
@@ -53,6 +50,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
   output memory_protocol_pkg::mem_request_t request_o,
   output wire response_ready_o
 );
+
   import core_pkg::*;
   import commit_event_pkg::*;
   import memory_protocol_pkg::*;
@@ -61,14 +59,25 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
   logic [31:0] memory_q, done_q, head_path_q;
   logic [31:0] instruction_q [32], pc_q [32], base_q [32], address_q [32];
   logic [11:0] sources_q [32];
+  logic [5:0] destination_q [32], forward_destination_q;
+  wire [5:0] engine_destination;
   logic [3:0] mask_q [32];
   wire [4:0] head = head_id_i[4:0];
   assign head_memory_o = head_valid_i && memory_q[head] && done_q[head] && head_path_q[head];
-  assign head_instruction_o = instruction_q[head];
-  assign head_sources_o = sources_q[head];
+  // read ahead the three possible next heads; allocation metadata settles before a descriptor becomes done.
+  logic [31:0] head_instruction_q;
+  logic [11:0] head_sources_q;
+  logic [4:0] head_slot_q;
+  wire [4:0] head1 = head + 5'd1, head2 = head + 5'd2;
+  always_ff @(posedge clk_i) begin
+    {head_slot_q, head_sources_q, head_instruction_q} <=
+        &head_step_i ? {head2, sources_q[head2], instruction_q[head2]}
+      : |head_step_i ? {head1, sources_q[head1], instruction_q[head1]} : {head, sources_q[head], instruction_q[head]};
+  end
+  assign head_instruction_o = head_instruction_q;
+  assign head_sources_o = head_sources_q;
 
-  // address generation
-  // one registered descriptor per issue, consumed the next cycle.
+  // address generation produces one registered descriptor per issue for the next cycle.
   wire generated, generated_store, generated_unsigned, generated_head_only, generated_fault, generated_uncached;
   wire [12:0] generated_id;
   wire [31:0] generated_address, generated_data, generated_base;
@@ -89,8 +98,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     .head_only_o(generated_head_only), .fault_o(generated_fault)
   );
 
-  // dispatch and address-result capture
-  // allocation refreshes slot ownership; lane zero also captures instruction metadata.
+  // dispatch refreshes slot ownership and lane-zero metadata; address results complete descriptors.
   always_ff @(posedge clk_i) begin
     for (int lane = 0; lane < 2; lane++)
       if (allocate_i[lane]) begin
@@ -102,6 +110,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
       if (TRACE) pc_q[allocate_id_i[4:0]] <= allocate_pc_i;
       sources_q[allocate_id_i[4:0]] <= allocate_sources_i;
     end
+    if (issue_i) destination_q[issue_id_i[4:0]] <= issue_destination_i;
     // a killed slot cannot be reallocated on the descriptor-write cycle.
     if (generated) begin
       done_q[generated_id[4:0]] <= 1;
@@ -112,8 +121,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     end
   end
 
-  // shared data-port arbitration
-  // the early engine and the head path share the data port; an offered request stays selected.
+  // shared data-port arbitration holds the selected request until acceptance.
   typedef enum logic [1:0] {IDLE, HEAD, EARLY} owner_e;
   owner_e owner_q;
   logic head_offered_q, early_offered_q;
@@ -154,9 +162,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
   wire engine_ready, engine_valid, engine_fault, engine_busy, engine_take;
   wire [12:0] engine_id;
   wire [31:0] engine_data;
-  // a load reads memory only when no older store owns a requested byte, and completes from the
-  // selector when older stores own all of them.
-  // shortcut: partial overlaps wait for the store to drain; merge memory and forwarded bytes if they matter for cpi.
+  // loads use memory or fully forwarded bytes; unknown and partial older-store overlaps wait.
   logic forward_valid_q;
   logic [12:0] forward_id_q;
   logic [31:0] forward_data_q;
@@ -192,19 +198,18 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     .memory_word_i(32'd0), .load_take_i(launch)
   );
 
-  // early-load recovery and transaction
-  // recovery keeps an older in-flight load; flush or a younger position kills it.
+  // early-load recovery preserves older work and kills younger work or all work on flush.
   function automatic logic killed(input logic [4:0] slot);
     return flush_i || (recover_i && 5'(slot - head) > 5'(recover_slot_i - head));
   endfunction
   // a forwarded result goes first, so the engine never completes under it
   assign engine_take = complete_take_i && engine_valid && !forward_valid_q;
   if (DCACHE) begin : cached
-    // two result entries take the cache's responses by id, in any order; a squashed load's late response
-    // matches no entry (ids carry their generation), and busy_o covers it until the cache is idle.
+    // two result entries match full response IDs; killed responses drain while the cache remains busy.
     logic kill_q;
     logic [1:0] entry_valid_q, entry_done_q;
     logic [12:0] entry_id_q [2];
+    logic [5:0] entry_destination_q [2];
     logic [31:0] entry_data_q [2];
     wire dc_ready, dc_response, dc_busy, stores_drained, sb_ready, sb_drain;
     wire [SB_N-1:0] sb_valid;
@@ -212,18 +217,21 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     wire [31:0] dc_data;
     wire free = entry_valid_q[0];
     wire pick = !(entry_valid_q[0] && entry_done_q[0]);
-    // a load accepted with kill_i would be dropped, so none is launched then
+    // registered cache kill blocks new load admission.
     assign engine_ready = dc_ready && !kill_q && !(&entry_valid_q);
     assign engine_valid = |(entry_valid_q & entry_done_q);
     assign engine_id = entry_id_q[pick];
+    assign engine_destination = entry_destination_q[pick];
     assign engine_data = entry_data_q[pick];
     assign engine_fault = 0;
-    // a buffered store keeps the unit busy, so fence, fence.i and the clean wait for it to land
+    // fences and cleaning wait for buffered stores to land.
     assign engine_busy = dc_busy || !stores_drained || (|entry_valid_q);
-    // an entry stays a forwarding candidate in its landing cycle: a load entering then reads the array before it
+    // forwarding includes a landing store because same-edge array reads still see its old bytes.
     assign retired_valid = sb_valid;
     assign store_buffer_full_o = !sb_ready;
     assign store_buffer_pending_o = !stores_drained;
+
+    // retired-store buffering and cached load execution
     store_buffer #(.DEPTH(SB_N)) buffer (
       .clk_i, .rst_i, .push_i(committed_valid_i), .push_address_i(committed_address_i),
       .push_data_i(committed_data_i), .push_mask_i(committed_mask_i), .drain_done_i(write_done_o),
@@ -244,7 +252,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
       .mem_request_valid_o(early_request_valid), .mem_request_o(early_request), .mem_response_ready_o(early_response_ready)
     );
     always_ff @(posedge clk_i) begin
-      // the cache drops its loads one cycle after a flush (registered kill, T5-A1); the entries drop at once.
+      // result entries clear immediately; the registered cache kill follows flush by one cycle (T5-A1).
       kill_q <= !rst_i && flush_i;
       for (int e = 0; e < 2; e++)
         if (rst_i) entry_valid_q[e] <= 0;
@@ -252,6 +260,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
           entry_valid_q[e] <= !killed(lsq_id[4:0]);
           entry_done_q[e] <= 0;
           entry_id_q[e] <= lsq_id;
+          entry_destination_q[e] <= destination_q[lsq_id[4:0]];
         end else if (entry_valid_q[e] && (killed(entry_id_q[e][4:0]) || (engine_take && pick == 1'(e))))
           entry_valid_q[e] <= 0;
         else if (dc_response && entry_valid_q[e] && !entry_done_q[e] && dc_id == entry_id_q[e]) begin
@@ -262,12 +271,13 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     wire unused_cached = issue_allowed_i;
 `ifndef SYNTHESIS
     always_ff @(posedge clk_i) if (!rst_i) begin
-      // with early loads every cacheable load is early, so the head path never reads or writes a line.
+      // cached builds route only uncached transactions through the head path.
       assert (!head_request_valid_i || head_request_i.uncached) else $fatal(1, "LSU_HEAD_CACHED");
     end
 `endif
   end else begin : uncached
     wire [12:0] engine_owner;
+    assign engine_destination = destination_q[engine_id[4:0]];
     wire [31:0] unused_address, unused_cause, unused_trap_value;
     wire unused_irrevocable;
     wire kill = killed(engine_owner[4:0]) && (flush_i || engine_busy);
@@ -296,16 +306,17 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     else if (launch_forward) begin
       forward_valid_q <= 1;
       forward_id_q <= lsq_id;
+      forward_destination_q <= destination_q[lsq_id[4:0]];
       forward_data_q <= forward_result;
     end
   end
   assign busy_o = !rst_i && (engine_busy || forward_valid_q || owner_q != IDLE || generated);
   assign complete_valid_o = engine_valid || forward_valid_q;
   assign complete_id_o = forward_valid_q ? forward_id_q : engine_id;
+  assign complete_destination_o = forward_valid_q ? forward_destination_q : engine_destination;
   wire [31:0] complete_data = forward_valid_q ? forward_data_q : engine_data;
 
-  // load completion event
-  // the event matches what the head path would have retired for the same load.
+  // load completion events match the architectural ROB-head memory view.
   always_comb begin
     automatic logic [4:0] slot = complete_id_o[4:0];
     automatic logic [31:0] instruction = instruction_q[slot];
@@ -337,7 +348,7 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
   end
   wire unused = ^{unused_descriptor, unused_ready, generated_fault, generated_uncached, unused_forward, lsq_ready[1]};
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (!rst_i) begin
     assert (!(select_head && select_early)) else $fatal(1, "LSU_PORT_SELECT");
@@ -346,6 +357,8 @@ module load_store_unit #(parameter bit TRACE = 1, parameter bit DCACHE = 0) (
     assert (!complete_take_i || complete_valid_o) else $fatal(1, "LSU_TAKE");
     assert (!issue_i || issue_instruction_i[6:0] inside {7'h03, 7'h23}) else $fatal(1, "LSU_ISSUE");
     if (generated) assert (memory_q[generated_id[4:0]]) else $fatal(1, "LSU_GENERATED_SLOT");
+    if (head_memory_o) assert (head_slot_q == head && head_instruction_q == instruction_q[head]
+                               && head_sources_q == sources_q[head]) else $fatal(1, "LSU_HEAD_VIEW");
     // an early load must be a live load whose address generation chose the early path.
     if (launch) assert (memory_q[lsq_id[4:0]] && done_q[lsq_id[4:0]] && !head_path_q[lsq_id[4:0]])
       else $fatal(1, "LSU_EARLY_KIND");

@@ -4,6 +4,7 @@ static void initialize(Bench& b) {
     b.memory.fill(0x0000000f);
     for (unsigned r=1;r<32;r++) b.memory[r-1]=instruction(2,r,0,0,r*7);
 }
+
 static void run(Bench& b,uint32_t stop,std::mt19937& rng,bool fill=false) {
     for (unsigned n=0;n<30000;n++) {
         Input i; i.trap_ready=true; i.request_ready=rng()%3!=0; i.latency=rng()%7;
@@ -16,6 +17,7 @@ static void run(Bench& b,uint32_t stop,std::mt19937& rng,bool fill=false) {
     }
     b.require(false,"system program watchdog pc="+std::to_string(b.pc)+" stop="+std::to_string(stop)+" occupancy="+std::to_string(b.d.occupancy_o)+" drain="+std::to_string(b.d.identity_drain_o)+" unsupported="+std::to_string(b.d.unsupported_o));
 }
+
 static void wait_prepared(Bench& b) {
     for (unsigned n=0;n<1000;n++) {
         Input i; i.retire=b.system_prepared ? 0:3; i.complete=3; b.tick(i);
@@ -23,6 +25,7 @@ static void wait_prepared(Bench& b) {
     }
     b.require(false,"system preparation watchdog");
 }
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

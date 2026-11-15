@@ -13,6 +13,7 @@ class CacheError(ValueError):
     pass
 
 
+# cache geometry and address decomposition
 @dataclass(frozen=True)
 class Geometry:
     size_bytes: int
@@ -79,6 +80,7 @@ class Result:
     writeback: int | None = None      # base of the dirty victim written back
 
 
+# functional cache contents, replacement order and access statistics
 class Cache:
     def __init__(self, geometry: Geometry, memory: Memory, writable: bool = True):
         if memory.line_bytes != geometry.line_bytes:

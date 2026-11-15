@@ -5,11 +5,14 @@ module frontend_fault_decode #(parameter bit M_EXTENSION = 0) (
   input  wire [63:0] instruction_i, pc_i,
   input  wire fetch_fault_i,
   input  wire [31:0] fetch_cause_i,
+
   output wire [1:0] fault_o,
   output wire [63:0] cause_o, value_o
 );
+
   import core_pkg::*;
   import platform_pkg::*;
+
   decoded_t [1:0] decoded;
 
   // per-lane fault classification

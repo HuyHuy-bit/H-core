@@ -79,8 +79,8 @@
     {
       "name": "lane_one_retire",
       "source": "rtl/memory/load_store_queue.sv",
-      "old": "sq_count_q > (SW+1)'(sq_pop0) && sq_id_q[sq_next] == retire_id_i[1]",
-      "new": "sq_count_q > (SW+1)'(sq_pop0) && sq_id_q[sq_head_q] == retire_id_i[1]",
+      "old": "sq_count_q > 1 && sq_id_q[sq_second] == retire_id_i[1]",
+      "new": "sq_count_q > 1 && sq_id_q[sq_head_q] == retire_id_i[1]",
       "assertions": [
         "ready_exact",
         "offer_exact",
@@ -102,8 +102,8 @@
     {
       "name": "issued_flag",
       "source": "rtl/memory/load_store_queue.sv",
-      "old": "if (load_take_i && load_valid_o) lq_issued_q[pick] <= 1;",
-      "new": "if (1'b0) lq_issued_q[pick] <= 1;",
+      "old": "if (load_take_i && load_valid_o) lq_issued_q[pick_q] <= 1;",
+      "new": "if (1'b0) lq_issued_q[pick_q] <= 1;",
       "assertions": [
         "offer_exact",
         "identity_exact"
@@ -131,8 +131,8 @@
     {
       "name": "oldest_pick",
       "source": "rtl/memory/load_store_queue.sv",
-      "old": "for (int k = LQ_N-1; k >= 0; k--) begin",
-      "new": "for (int k = 0; k < LQ_N; k++) begin",
+      "old": "return |(v & after_head) ? lowest(v & after_head) : lowest(v);",
+      "new": "return lowest(v);",
       "assertions": [
         "offer_exact",
         "identity_exact",

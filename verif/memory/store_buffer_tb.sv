@@ -1,6 +1,5 @@
 `default_nettype none
-// store_buffer against a queue model: directed fill, hold and push-in-pop-cycle steps, then random traffic.
-// Every output is compared with the model before each edge. +negative=push_full|pop_empty breaks the contract.
+// compare all outputs with an independent store queue before each edge, including held and simultaneous push/pop.
 module store_buffer_tb;
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;

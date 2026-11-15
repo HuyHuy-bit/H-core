@@ -4,28 +4,34 @@
 #include <sstream>
 
 using namespace perf_attribution;
+
 static Instruction ins(unsigned id,uint32_t pc,uint32_t op=0x13) {
     return {true,false,id,pc,op,pc+4};
 }
+
 static Frame frame(unsigned cycle,std::initializer_list<unsigned> ids={}) {
     Frame f; f.cycle=cycle;
     for (unsigned id:ids) { f.rob_valid|=1u<<(id&31); f.rob_id[id&31]=id; }
     return f;
 }
+
 static void issue(Frame& f,unsigned id,unsigned port=0) {
     f.iq[0]={true,id,3,3,1u<<port,{0,0}};
     f.port_ready=1u<<port; f.issue=1u<<port; f.issue_id[port]=id;
 }
+
 static void expect(const Observer& o,unsigned scope,const std::string& key,uint64_t value) {
     const auto& c=o.totals()[scope];
     check((c.count(key) ? c.at(key):0)==value,key.c_str());
 }
+
 static void rejected(const std::string& message,const std::function<void()>& action) {
     try { action(); } catch (const std::runtime_error& e) {
         check(e.what()=="ATTRIBUTION "+message,"wrong negative signature"); return;
     }
     throw std::runtime_error("missed negative: "+message);
 }
+
 static void head_window() {
     Observer o;
     auto f=frame(0); f.allocated[0]=ins(0,16); o.sample(f);
@@ -41,6 +47,7 @@ static void head_window() {
     check(text.str().find("ATTR all live_at_end 0\n")!=std::string::npos ||
           text.str().find("ATTR all live_at_end")==std::string::npos,"terminal live count");
 }
+
 static void branch_gap(bool flush) {
     Observer o;
     auto f=frame(0); f.allocated[0]=ins(0,16,0x63); o.sample(f);
@@ -56,6 +63,7 @@ static void branch_gap(bool flush) {
     expect(o,0,"retired_miss_recovery_samples",flush ? 0:1);
     expect(o,0,"retired_miss_redirect_dispatch_cycles",flush ? 0:2);
 }
+
 static void wrong_path_branch() {
     Observer o;
     auto f=frame(0); f.allocated={ins(0,16,0x63),ins(1,20,0x63)}; o.sample(f);
@@ -68,6 +76,7 @@ static void wrong_path_branch() {
     expect(o,0,"cfi_resolved",2); expect(o,0,"squashed_resolved_cfi",1);
     expect(o,0,"retired_cfi",1); expect(o,0,"retired_cfi_misses",1);
 }
+
 static void identity_negatives() {
     Observer o;
     auto f=frame(0); f.allocated[0]=ins(0,16); o.sample(f);
@@ -88,6 +97,7 @@ static void identity_negatives() {
     f=frame(1,{0}); f.iq[0]={true,0,0,3,1,{7,8}};
     rejected("operand readiness",[&] { readiness.sample(f); });
 }
+
 static void forwarding() {
     Frame f;
     Load l{true,true,true,false,6,2,128};
@@ -107,6 +117,7 @@ static void forwarding() {
     f.pick_id=6; f.memory_mask=1;
     rejected("load masks",[&] { o.sample(f); });
 }
+
 static void load_timing() {
     Observer o;
     auto f=frame(0); f.allocated={ins(0,16,3),ins(1,20)}; o.sample(f);
@@ -123,6 +134,7 @@ static void load_timing() {
     expect(o,0,"completion1_conflict",1); expect(o,0,"completion1_alu_wait",1);
     expect(o,0,"completion1_load_wait",0);
 }
+
 static void restriction_counters() {
     Observer o;
     auto f=frame(0); f.fetch_lanes=3; f.allocated={ins(0,16,3),ins(1,20)}; f.allocated[1].valid=false; o.sample(f);

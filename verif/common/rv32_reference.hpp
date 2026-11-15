@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 namespace rv32 {
+
 inline bool illegal(uint32_t insn, bool m = false) {
     unsigned opcode=insn&127, f=(insn>>12)&7, upper=insn>>25;
     switch (opcode) {
@@ -45,6 +46,7 @@ inline int operation(uint32_t insn, bool m = false) {
     if (opcode == 0x67 && f == 0) return 28;
     return -1;
 }
+
 inline uint32_t instruction(unsigned op, unsigned rd, unsigned a, unsigned b, uint32_t imm = 0) {
     if (op >= 36 && op <= 43) return (1U << 25) | (b << 20) | (a << 15) | ((op-36) << 12) | (rd << 7) | 0x33;
     if (op >= 21 && op <= 26) {
@@ -64,7 +66,9 @@ inline uint32_t instruction(unsigned op, unsigned rd, unsigned a, unsigned b, ui
     }
     return (alternate << 25) | (b << 20) | (a << 15) | (function[op] << 12) | (rd << 7) | 0x33;
 }
+
 inline int64_t signed_value(uint32_t v) { return v&0x80000000U ? int64_t(v)-INT64_C(4294967296) : int64_t(v); }
+
 inline uint32_t arithmetic_right(uint32_t a, unsigned shift) {
     shift &= 31;
     uint32_t result = a >> shift;
@@ -83,9 +87,11 @@ inline uint32_t m_result(unsigned f3, uint32_t a, uint32_t b) {
     case 5: return b ? a/b : UINT32_MAX;
     case 6: return b ? uint32_t(sa%sb) : a;
     case 7: return b ? a%b : a;
+
     default: throw std::runtime_error("bad rv32m funct3");
     }
 }
+
 inline uint32_t evaluate(unsigned op, uint32_t insn, uint32_t pc, uint32_t a, uint32_t b) {
     uint32_t immediate = insn >> 20;
     if (immediate&2048) immediate |= 0xfffff000U;
@@ -106,9 +112,11 @@ inline uint32_t evaluate(unsigned op, uint32_t insn, uint32_t pc, uint32_t a, ui
     case 21: case 22: case 23: case 24: case 25: case 26: return 0;
     case 27: case 28: return pc+4U;
     case 36: case 37: case 38: case 39: case 40: case 41: case 42: case 43: return m_result(op-36, a, b);
+
     default: throw std::runtime_error("unsupported reference operation");
     }
 }
+
 inline uint32_t extend(uint32_t value, unsigned bits) {
     return value & (1U << (bits-1)) ? value | (UINT32_MAX << bits) : value;
 }

@@ -5,25 +5,31 @@ module chip_top (
   // instruction port
   output wire request_valid_o,
   output memory_protocol_pkg::mem_request_t request_o,
+
   input  wire request_ready_i,
   input  wire response_valid_i,
   input  memory_protocol_pkg::mem_response_t response_i,
+
   output wire response_ready_o,
   // data port
   output wire data_request_valid_o,
   output memory_protocol_pkg::mem_request_t data_request_o,
+
   input  wire data_request_ready_i,
   input  wire data_response_valid_i,
   input  memory_protocol_pkg::mem_response_t data_response_i,
+
   output wire data_response_ready_o,
   output wire fatal_o
 );
+
   wire admission_valid;
   wire [12:0] admission_id;
   // Register external reset twice before it fans out to the core.
   logic [1:0] reset_q;
   always_ff @(posedge clk_i) reset_q <= {reset_q[0], rst_i};
 
+  // cached RV32IM core with store admission acknowledged locally
   cpu_top #(.FRONTEND_FAULTS(1), .TRAP_SERVICE(1), .MEMORY_SERVICE(1), .EARLY_LOADS(1), .DCACHE(1), .ICACHE(1), .M_EXTENSION(1), .TRACE(0)) core (
     .clk_i, .rst_i(reset_q[1]), .enable_i(1'b1), .flush_i(1'b0), .drained_i(1'b0), .flush_pc_i(32'd0),
     .request_ready_i, .response_valid_i, .response_i,

@@ -27,18 +27,23 @@ using rv32::extend;
 #ifndef TB_M_EXTENSION
 #define TB_M_EXTENSION 0
 #endif
+
 inline bool illegal(uint32_t insn) { return rv32::illegal(insn, TB_M_EXTENSION); }
+
 inline int operation(uint32_t insn) { return rv32::operation(insn, TB_M_EXTENSION); }
 // an OP funct7 that stays illegal in both modes; 0x02000033 is MUL x0 when M is on
 constexpr uint32_t ILLEGAL_FUNCT7 = TB_M_EXTENSION ? 0x04000033U : 0x02000033U;
 using rv32::evaluate;
+
 struct Input {
     bool reset=false, enable=true, flush=false, drain=false, grant=true, request_ready=true;
     uint32_t target=0;
     unsigned execute=3, complete=3, retire=3, latency=1;
     bool inject_bad=false, trap_ready=false;
 };
+
 struct Expected { Event event{}; unsigned op, rd; uint32_t result, next_pc; bool fault, taken=false; };
+
 struct Bench {
     Vcpu_top d;
     std::array<uint32_t,16384> memory{};
@@ -55,28 +60,36 @@ struct Bench {
     uint32_t pc=0, pending_address=0, error_address=UINT32_MAX;
     uint64_t order=0;
     bool pending=false, held=false, fatal=false, data_fatal=false, dropped=false;
+    bool fetch_redirect=false, fetch_repair=false;  // fetch sees a redirect, and whether it is a repair, one cycle after the core signals it
     std::array<uint32_t,(REQUEST_BITS+31)/32> held_request{};
     // capture instruction bytes at request acceptance for the fetch oracle.
     std::array<uint32_t,8> pending_line{};
     // fetch may show any line received since the last reset, flush, trap, mret or fence.i.
     std::map<uint32_t,std::array<uint32_t,8>> delivered;
+
     void require(bool good,const std::string& why) const {
         if (!good) throw std::runtime_error("fetch execution core mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     static bool fence(uint32_t insn) { return (insn&0x707f)==0x0f; }
+
     static bool fence_i(uint32_t insn) { return (insn&0x707f)==0x100f; }
+
     bool system_instruction(uint32_t insn) const {
         const unsigned kind=(insn>>12)&7;
         return insn==0x30200073 || insn==0x10500073 || ((insn&127)==0x73 && kind!=0 && kind!=4)
             || (memory_service && (fence(insn) || fence_i(insn)));
     }
+
     static bool decoded_fault(uint32_t insn) {
         return illegal(insn) || insn==0x00000073 || insn==0x00100073;
     }
+
     static void effects(Event& event,const Reply& reply) {
         for (unsigned n=0;n<4;n++) for (unsigned f=0;f<7;f++)
             put(event,n*CSR_EFFECT_BITS+FIELD_OFFSET[f],FIELD_WIDTH[f],reply.effects[n][f]);
     }
+
     Expected expected_system() {
         const uint32_t insn=memory[pc/4];
         const bool mret=insn==0x30200073;
@@ -100,6 +113,7 @@ struct Bench {
         }
         return e;
     }
+
     virtual Expected expected() {
         if (fault_support && (pc%4 || pc>=65536 || (pc&~31U)==error_address || decoded_fault(memory[pc/4]))) {
             const bool fetch=pc%4 || pc>=65536 || (pc&~31U)==error_address;
@@ -157,10 +171,12 @@ struct Bench {
         }
         return e;
     }
+
     template<class T> void compare(const T& actual,unsigned offset,const Event& want) {
         for (unsigned n=0; n<EVENT_BITS; ++n)
             require(bit(actual,offset+n)==bit(want,n),"architectural event bit "+std::to_string(n)+" PC="+std::to_string(pc));
     }
+
     Event finalized_fault() {
         auto raw=expected(); require(raw.fault,"trap without reference fault");
         auto e=raw.event;
@@ -185,11 +201,18 @@ struct Bench {
         }
         return e;
     }
+
     virtual uint32_t fetch_word(uint32_t address) const { return memory[address/4]; }
+
     virtual void drive_memory(const Input&) {}
+
     virtual void observe_memory(const Input&) {}
+
     virtual void memory_retired(const Expected&) {}
+
     virtual void memory_trapped() {}
+
+    // compare the current cycle before committing the reference model's accepted effects.
     void tick(Input i={}) {
         d.memory_issue_allowed_i=0; d.admit_valid_i=0; d.admit_id_i=0;
         d.data_request_ready_i=0; d.data_response_valid_i=0;
@@ -213,7 +236,7 @@ struct Bench {
         unsigned ordinary=0;
         if (i.reset) {
             require(!d.request_valid_o && !d.response_ready_o && !d.dispatch_o && !d.retire_accept_o && !d.redirect_o,"reset outputs");
-            pending=held=fatal=data_fatal=dropped=false; delivered.clear();
+            pending=held=fatal=data_fatal=dropped=false; delivered.clear(); fetch_redirect=fetch_repair=false;
             pc=0; order=0; expected_id=0; known.fill(false); known[0]=true; regs[0]=0;
             trap_csrs={0x1800,0,0,0}; csr_state.reset_state(); system_prepared=false;
             coverage["reset"]++;
@@ -314,18 +337,19 @@ struct Bench {
                     }
                 } else if (pending && delay) --delay;
                 // a redirect discards the response of any outstanding request.
-                if (d.redirect_o) {
-                    if (!repair) delivered.clear();
+                if (fetch_redirect) {
+                    if (!fetch_repair) delivered.clear();
                     if (pending || held) dropped=true;
                 }
                 if (response && d.response_ready_o) {
                     pending=false; expected_id=(expected_id+1)%16;
-                    if (!dropped && !d.redirect_o && pending_address!=error_address) delivered[pending_address]=pending_line;
+                    if (!dropped && !fetch_redirect && pending_address!=error_address) delivered[pending_address]=pending_line;
                     dropped=false;
                     for (unsigned n=0;n<8;++n) if (pending_line[n]!=memory[pending_address/4+n]) { coverage["stale_response"]++; break; }
                 }
                 if (i.inject_bad) { fatal=true; coverage["fatal_injected"]++; }
             }
+            fetch_redirect=d.redirect_o; fetch_repair=repair;
             require(d.retire_accept_o!=2,"retirement prefix");
             if (system_service && system_prepared && d.retire_valid_o && !system_expected.fault) {
                 require(d.retire_valid_o==1,"system retirement must be solo");
@@ -377,7 +401,9 @@ struct Bench {
         if (!i.reset && system_service) csr_state.advance(false,ordinary,csr_accept ? &accepted_csr:nullptr);
         d.clk_i=1; d.eval(); ++cycles;
     }
+
     void reset() { Input i; i.reset=true; tick(i); }
+
     void run_to(uint32_t stop,std::mt19937& rng,bool fill=false) {
         for (unsigned n=0;n<20000;++n) {
             Input i; i.request_ready=rng()%3!=0; i.latency=rng()%5;
@@ -391,6 +417,7 @@ struct Bench {
         require(false,"program progress watchdog");
     }
 };
+
 void program(Bench& b,std::mt19937& rng) {
     b.memory.fill(0); unsigned cursor=0;
     auto emit=[&](uint32_t insn){ b.memory[cursor++]=insn; };

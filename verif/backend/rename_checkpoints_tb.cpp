@@ -15,8 +15,11 @@
 #include <vector>
 
 using Map = std::array<unsigned, 32>;
+
 struct Instruction { uint64_t sequence; unsigned rd, tag, stale; };
+
 struct Branch { unsigned slot; uint64_t boundary; Map snapshot; };
+
 struct Input {
     std::vector<unsigned> rd;
     bool create = false, resolve = false, mispredict = false, reset = false, flush = false;
@@ -35,14 +38,17 @@ public:
     std::map<std::string, unsigned> coverage;
     unsigned cycles = 0, probes = 0;
     Check() { std::iota(committed.begin(), committed.end(), 0); }
+
     void require(bool ok, const std::string& what) const {
         if (!ok) throw std::runtime_error("rename checkpoints mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     Map current() const {
         auto result = committed;
         for (const auto& insn : instructions) if (insn.rd) result[insn.rd] = insn.tag;
         return result;
     }
+
     std::set<unsigned> free_tags() const {
         std::set<unsigned> result;
         for (unsigned p = 1; p < 64; ++p) result.insert(p);
@@ -50,11 +56,13 @@ public:
         for (const auto& insn : instructions) if (insn.rd) result.erase(insn.tag);
         return result;
     }
+
     unsigned valid() const {
         unsigned mask = 0;
         for (const auto& b : branches) mask |= 1U << b.slot;
         return mask;
     }
+
     unsigned committable() const {
         unsigned count = 0;
         for (const auto& insn : instructions) {
@@ -70,6 +78,7 @@ public:
             if (insn.rd && insn.sequence > branch.boundary) bits |= UINT64_C(1) << insn.tag;
         return bits;
     }
+
     template<class Packed> static void pack(Packed& target, const Map& map) {
         for (unsigned word = 0; word < 6; ++word) target[word] = 0;
         for (unsigned arch = 0; arch < 32; ++arch)
@@ -78,6 +87,7 @@ public:
                 target[offset/32] |= ((map[arch] >> bit) & 1U) << (offset%32);
             }
     }
+
     template<class Packed> static Map unpack(const Packed& target) {
         Map result{};
         for (unsigned arch = 0; arch < 32; ++arch)
@@ -87,6 +97,7 @@ public:
             }
         return result;
     }
+
     void check_restore(unsigned index) {
         unsigned released = 0;
         for (unsigned n = index; n < branches.size(); ++n) released |= 1U << branches[n].slot;
@@ -95,6 +106,7 @@ public:
         for (auto p : branches[index].snapshot)
             require(!((dut.reclaim_o >> p) & 1), "reclaimed retained snapshot mapping");
     }
+
     void inspect() {
         dut.clk_i = 0; dut.rst_i = 0; dut.flush_i = 0;
         dut.create_i = 0; dut.allocation_i = 0;
@@ -104,12 +116,14 @@ public:
         }
         dut.resolve_i = 0; dut.mispredict_i = 0; dut.eval();
     }
-    unsigned run(const Input& in) {
+
+    unsigned run(Input in) {
         ++cycles;
         require(in.commits <= committable(), "test commits across unresolved CFI");
         const unsigned before = valid();
         const bool recovery = in.resolve && in.mispredict;
-        const bool ready = !in.reset && !in.flush && !recovery && before != 255;
+        if (in.flush || recovery) in.create = false;  // the caller never creates in a flush or recovery cycle
+        const bool ready = !in.reset && before != 255;
         const bool accept = in.create && ready;
         unsigned candidate = 0;
         while (candidate < 8 && (before & (1U << candidate))) ++candidate;
@@ -164,7 +178,7 @@ public:
             coverage["recovery"]++;
             coverage["nested_recovery"] += index > 0;
             coverage["younger_kill"] += index+1 < branches.size();
-            coverage["recovery_collision"] += in.create && !in.rd.empty();
+            coverage["recovery_collision"] += !in.rd.empty();
             const auto boundary = found->boundary;
             while (!instructions.empty() && instructions.back().sequence > boundary) instructions.pop_back();
             branches.erase(branches.begin()+index, branches.end());
@@ -189,7 +203,9 @@ public:
         inspect();
         return candidate;
     }
+
     void reset() { Input in; in.reset = true; run(in); }
+
     void negative(const std::string& name) {
         reset(); Input branch; branch.create = true; branch.rd = {0};
         if (name == "duplicate_allocation") {

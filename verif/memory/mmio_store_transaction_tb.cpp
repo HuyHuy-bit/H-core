@@ -13,12 +13,14 @@
 using packed_bits::put;
 
 struct Store { unsigned id=0, size=0, cause=0; uint32_t address=0, raw=0; };
+
 struct Input {
     Store desc;
     bool reset=false, kill=false, launch=false, allow=false, head=false;
     bool request_ready=false, response=false, take=false;
     unsigned head_id=0, response_id=0, status=0, payload=0, bit=0;
 };
+
 struct Bench {
     Vmmio_store_transaction d;
     std::mt19937 rng;
@@ -29,20 +31,26 @@ struct Bench {
     std::bitset<4> id_bits;
     std::bitset<256> line_bits;
     std::bitset<32> word_bits;
+
     explicit Bench(unsigned seed): rng(seed) {}
+
     void require(bool ok,const std::string& why) const {
         if (!ok) throw std::runtime_error("mmio store mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     Store make(unsigned id,unsigned size,uint32_t address,unsigned cause=0) {
         return {id,size,cause,address,uint32_t(rng())};
     }
+
     Input input(Store s) {
         Input i; i.desc=s; i.head_id=s.id; i.response_id=transaction; return i;
     }
+
     Input noise() {
         auto i=input(make(rng()%8192,rng()%3,rng()));
         i.allow=rng()%2; i.head=rng()%2; i.head_id=rng()%8192; return i;
     }
+
     void drive(Input i) {
         d.clk_i=0; d.rst_i=i.reset; d.kill_i=i.kill; d.launch_i=i.launch;
         d.id_i=i.desc.id; d.address_i=i.desc.address; d.size_i=i.desc.size;
@@ -59,6 +67,7 @@ struct Bench {
         put(d.response_i,RESPONSE_STATUS_OFFSET,2,i.status);
         if (i.payload) put(d.response_i,(i.payload==1 ? RESPONSE_LINE_READ_DATA_OFFSET:RESPONSE_UNCACHED_READ_DATA_OFFSET)+i.bit,1,1);
     }
+
     void step(Input i) {
         drive(i); d.eval();
         bool live=!i.reset && !fatal, irrev=!i.reset && owned && authorized;
@@ -116,9 +125,13 @@ struct Bench {
             }
         }
     }
+
     void reset() { Input i; i.reset=true; step(i); step(input({})); }
+
     void launch(Store s) { auto i=input(s); i.launch=true; step(i); }
+
     void authorize(Store s) { auto i=noise(); i.head_id=s.id; i.desc.id=s.id^8191; i.allow=i.head=true; step(i); }
+
     void qualifiers() {
         auto s=make(8191,0,0x10000003); launch(s);
         auto i=input(s); i.head=true; step(i); ++count["permission_block"];
@@ -129,6 +142,7 @@ struct Bench {
         step(i); ++count["idle_kill"];
         step(input(s));
     }
+
     void run(Store s,bool fast,bool permissions,bool access_fault) {
         launch(s); auto i=input(s);
         unsigned waits=fast ? 0:1+rng()%4;
@@ -147,6 +161,7 @@ struct Bench {
         ++count[access_fault ? "access_fault":"ok"]; ++count["size_"+std::to_string(s.size)];
         ++count["offset_"+std::to_string(s.address%32)];
     }
+
     void local_faults() {
         for (unsigned cause=6;cause<=7;++cause) for (unsigned action=0;action<3;++action) {
             auto s=make(67,2,0x10000003,cause); launch(s); auto i=input(s);
@@ -160,6 +175,7 @@ struct Bench {
             ++count["local_"+std::to_string(cause)+"_"+std::to_string(action)];
         }
     }
+
     void protocol(unsigned kind,unsigned bit=0) {
         reset(); auto s=make(8191,0,0x10000003); auto i=input(s);
         if (kind!=0) launch(s);
@@ -182,6 +198,7 @@ struct Bench {
         for (unsigned n=0;n<3;++n) { auto j=noise(); j.request_ready=j.response=true; j.status=3; step(j); }
         ++count["bad_"+std::to_string(kind)]; reset();
     }
+
     void reset_phases() {
         for (unsigned phase=0;phase<5;++phase) {
             reset(); auto s=make(35,2,28); auto i=input(s);
@@ -194,6 +211,7 @@ struct Bench {
             step(i); step(input(s)); ++count["reset_phase_"+std::to_string(phase)];
         }
     }
+
     void negative(const std::string& name) {
         reset(); auto s=make(7,0,0x10000003); auto i=input(s);
         if (name.rfind("kill-",0)==0) {
@@ -219,6 +237,7 @@ struct Bench {
         d.eval(); d.clk_i=1; d.eval(); throw std::runtime_error("caller violation survived");
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

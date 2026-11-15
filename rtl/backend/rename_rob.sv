@@ -1,7 +1,6 @@
 `default_nettype none
 // two-wide rename + rob + prf core: allocation, completion, branch resolution and in-order retirement.
 module rename_rob #(parameter bit TRACE = 1) (
-  // inputs
   input  wire clk_i, rst_i, flush_i, drained_i,
   input  wire resources_ready_i,
   input  wire [1:0] valid_i, cfi_i, solo_i,
@@ -17,9 +16,10 @@ module rename_rob #(parameter bit TRACE = 1) (
   input  wire [12:0] serial_id_i,
   input  commit_event_pkg::commit_event_t serial_event_i,
   input  wire trap_ready_i,
+  input  wire recover_hold_i,
   input  wire [23:0] read_address_i,
+  input  wire [11:0] head_address_i,
 
-  // outputs
   output wire [1:0] allocate_accept_o,
   output wire [25:0] allocate_id_o,
   output wire [11:0] source1_o, source2_o, destination_o, stale_o,
@@ -37,6 +37,8 @@ module rename_rob #(parameter bit TRACE = 1) (
   output commit_event_pkg::commit_event_t trap_event_o,
   output wire [127:0] read_data_o,
   output logic [3:0] read_ready_o,
+  output wire [63:0] head_data_o,
+  output logic [1:0] head_ready_o,
   output wire head_valid_o,
   output wire [12:0] head_id_o,
   output wire [31:0] head_pc_o,
@@ -49,13 +51,15 @@ module rename_rob #(parameter bit TRACE = 1) (
   output wire [7:0] checkpoint_valid_o, checkpoint_released_o,
   // checkpoint held by the cfi in a rob slot: the issuing slot and the resolving one
   input  wire [4:0] lookup_slot_i,
+
   output wire [2:0] lookup_checkpoint_o, resolve_checkpoint_o
 );
+
   wire [1:0] rob_allocate_ready, rob_allocate_accept, rob_complete_ready;
   wire [11:0] rob_wb_destination;
-  wire serial_selected = serial_offer_i && serial_ready_o;
-  wire [1:0] wb_live = serial_selected ? 2'b01 : rob_complete_ready;
-  assign wb_destination_o = serial_selected ? {6'd0, retire_destination_o[5:0]} : rob_wb_destination;
+  // write port zero belongs to a completion offered on lane zero, otherwise to a serial retirement.
+  wire [1:0] wb_live = {rob_complete_ready[1], complete_offer_i[0] ? rob_complete_ready[0] : serial_offer_i && serial_ready_o};
+  assign wb_destination_o = {rob_wb_destination[11:6], complete_offer_i[0] ? rob_wb_destination[5:0] : retire_destination_o[5:0]};
   wire recover = flush_i || trap_accept_o;
   wire [1:0] rename_commit, commit_request;
   wire rob_resolve_ready, rename_resolve, rename_recover;
@@ -66,11 +70,10 @@ module rename_rob #(parameter bit TRACE = 1) (
 
   // completion and writeback admission
   for (genvar lane = 0; lane < 2; lane++) begin : completion_control
-    assign write_offer[lane] = serial_selected
-        ? (lane == 0 && retire_ready_i[0] && serial_event_i.rd_write_mask != 0)
-        : (complete_offer_i[lane] && !complete_event_i[lane].trap);
-    assign completion_take[lane] = complete_offer_i[lane] && rob_complete_ready[lane]
-        && (complete_event_i[lane].trap || wb_destination_o[lane*6 +: 6] == 0 || wb_accept_o[lane]);
+    assign write_offer[lane] = complete_offer_i[lane] ? !complete_event_i[lane].trap
+        : (lane == 0 && serial_offer_i && retire_ready_i[0] && serial_event_i.rd_write_mask != 0);
+    // BACKEND_COMPLETE_WRITE guarantees writeback for a live completion.
+    assign completion_take[lane] = complete_offer_i[lane] && rob_complete_ready[lane];
   end
 
   // operand readiness and bypass
@@ -83,16 +86,18 @@ module rename_rob #(parameter bit TRACE = 1) (
           read_ready_o[port_id] = 1;
       if (rst_i || recover) read_ready_o[port_id] = 0;
     end
+    for (int port_id = 0; port_id < 2; port_id++) begin
+      head_ready_o[port_id] = ready_o[head_address_i[port_id*6 +: 6]] && !reclaim[head_address_i[port_id*6 +: 6]];
+      if (rst_i || recover) head_ready_o[port_id] = 0;
+    end
   end
 
-  assign commit_request[0] = retire_valid_o[0] && retire_ready_i[0]
-      && (!serial_selected || retire_destination_o[5:0] == 0 || wb_accept_o[0]);
+  // BACKEND_SERIAL_ATOMIC guarantees writeback for an accepted serial retirement.
+  assign commit_request[0] = retire_valid_o[0] && retire_ready_i[0];
   assign commit_request[1] = retire_valid_o[1] && retire_ready_i[1] && commit_request[0];
-  assign wb_data_o = serial_selected ? {32'd0, serial_event_i.rd_value}
-      : {complete_event_i[1].rd_value, complete_event_i[0].rd_value};
+  assign wb_data_o = {complete_event_i[1].rd_value, complete_offer_i[0] ? complete_event_i[0].rd_value : serial_event_i.rd_value};
 
-  // branch checkpoint lookup
-  // checkpoint slots are looked up only through a validated, unresolved rob identity.
+  // checkpoint lookup through validated, unresolved ROB identities
   always_ff @(posedge clk_i) begin
     for (int lane = 0; lane < 2; lane++)
       if (allocate_accept_o[lane] && cfi_i[lane])
@@ -109,7 +114,7 @@ module rename_rob #(parameter bit TRACE = 1) (
     .wb_offer_i(write_offer), .wb_live_i(wb_live), .wb_destination_i(wb_destination_o),
     .wb_accept_o, .commit_i(commit_request), .commit_accept_o(rename_commit),
     .commit_rd_i(retire_rd_o), .commit_destination_i(retire_destination_o), .commit_stale_i(retire_stale_o),
-    .resolve_i(resolve_offer_i && resolve_grant_i), .resolve_live_i(rob_resolve_ready),
+    .resolve_i(resolve_offer_i && resolve_grant_i), .resolve_live_i(rob_resolve_ready), .branch_recover_i(branch_recover_o),
     .mispredict_i, .resolve_id_i(resolve_checkpoint_o),
     .resolve_accept_o(rename_resolve), .branch_recover_o(rename_recover),
     .accept_o(allocate_accept_o), .source1_o, .source2_o, .destination_o, .stale_o, .source_ready_o,
@@ -130,17 +135,17 @@ module rename_rob #(parameter bit TRACE = 1) (
     .retire_take_i(rename_commit), .retire_valid_o, .retire_accept_o, .retire_rd_o,
     .retire_destination_o, .retire_stale_o, .retire_event_o,
     .serial_offer_i, .serial_id_i, .serial_event_i, .serial_ready_o, .serial_accept_o,
-    .trap_take_i(trap_ready_i && trap_valid_o), .trap_valid_o, .trap_accept_o, .trap_event_o,
+    .trap_take_i(trap_ready_i && trap_valid_o), .recover_hold_i, .trap_valid_o, .trap_accept_o, .trap_event_o,
     .head_valid_o, .head_id_o, .head_pc_o, .occupancy_o, .identity_drain_o
   );
 
   // physical register file
-  prf_4r2w registers (
-    .clk_i, .rst_i, .raddr_i(read_address_i), .rdata_o(read_data_o),
+  prf_4r2w #(.READS(6), .BYPASS_READS(4)) registers (
+    .clk_i, .rst_i, .raddr_i({head_address_i, read_address_i}), .rdata_o({head_data_o, read_data_o}),
     .wb_accept_i(wb_accept_o), .waddr_i(wb_destination_o), .wdata_i(wb_data_o)
   );
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin
@@ -149,9 +154,12 @@ module rename_rob #(parameter bit TRACE = 1) (
         else $fatal(1, "BACKEND_ATOMIC_CONTROL");
       assert ((wb_accept_o & ~(complete_accept_o | {1'b0, serial_accept_o})) == 0 && checkpoint_accept_o == (|(allocate_accept_o & cfi_i)))
         else $fatal(1, "BACKEND_ATOMIC_RESULT");
-      assert (!serial_accept_o || (retire_accept_o == 1 && complete_accept_o == 0
-              && wb_accept_o == (retire_destination_o[5:0] == 0 ? 2'b00 : 2'b01)))
+      assert (!serial_accept_o || (retire_accept_o == 1
+              && (retire_destination_o[5:0] == 0 || (wb_accept_o[0] && !complete_offer_i[0]))))
         else $fatal(1, "BACKEND_SERIAL_ATOMIC");
+      for (int lane = 0; lane < 2; lane++)
+        assert (!complete_accept_o[lane] || complete_event_i[lane].trap || rob_wb_destination[lane*6 +: 6] == 0
+                || wb_accept_o[lane]) else $fatal(1, "BACKEND_COMPLETE_WRITE");
       assert (!drained_i || (!serial_offer_i && valid_i == 0 && complete_offer_i == 0 && !resolve_offer_i))
         else $fatal(1, "BACKEND_DRAIN");
     end

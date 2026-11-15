@@ -12,10 +12,17 @@ SEEDS = (1, 2, 3)
 
 class L1CacheArrayRtlTest(unittest.TestCase):
     def test_random_against_shadow(self):
+        # byte-masked writes (D-cache) and whole-line writes behind one gate per entry (I-cache)
+        for byte_write in (1, 0):
+            with self.subTest(byte_write=byte_write):
+                self.check(byte_write)
+
+    def check(self, byte_write):
         with tempfile.TemporaryDirectory() as tmp:
             # unique X init makes unreset storage random, so the bench must only compare written bits.
             build = subprocess.run(["verilator", "--binary", "--timing", "--assert", "-Wno-fatal",
                                     "--x-initial", "unique", "--top-module", "l1_cache_array_tb",
+                                    f"-GBYTE_WRITE={byte_write}",
                                     "--Mdir", tmp, *map(str, SOURCES)], capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             counts = set()

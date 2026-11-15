@@ -6,6 +6,7 @@ static Completion serial_result(Check& c,unsigned index,std::mt19937& rng) {
     if (!c.queue[index].rd) put(r.event,RD_VALUE_OFFSET,32,0);
     return r;
 }
+
 static void empty(Check& c,std::mt19937& rng) {
     for (unsigned n=0;!c.queue.empty();n++) {
         c.require(n<200,"drain progress"); Input i; i.trap_ready=true;
@@ -15,17 +16,20 @@ static void empty(Check& c,std::mt19937& rng) {
         c.run(i);
     }
 }
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {
         unsigned seed=argc>1 ? std::stoul(argv[1]):1; std::mt19937 rng(seed); Check c;
         Input i; i.reset=true; c.run(i);
         for (unsigned rd=0;rd<32;rd++) {
-            i={}; i.count=1; i.solo=1; i.rd[0]=rd; c.run(i);
+            // a younger ordinary entry completes beside the serial head; on lane zero it keeps write port zero first.
+            i={}; i.count=2; i.solo=1; i.rd={rd,1}; c.run(i);
             auto packet=serial_result(c,0,rng); const auto tag=c.queue.front().destination;
             for (unsigned ready:{0,2,0,2}) {
                 i={}; i.serial=packet; i.retire_ready=ready; i.count=2; i.rd={1,2};
-                i.complete={c.result(0,rng),c.result(0,rng)}; i.read={tag,tag,tag,0}; c.run(i);
+                if (!c.queue[1].done) i.complete[rd%2]=c.result(1,rng);
+                i.read={tag,tag,tag,0}; c.run(i);
             }
             i={}; i.serial=packet; i.read={tag,tag,tag,0}; c.run(i); c.run();
             c.require(c.queue.empty(),"serial head not removed");
@@ -70,7 +74,7 @@ int main(int argc,char** argv) {
         auto packet=serial_result(c,0,rng);
         i={}; i.count=1; i.cfi=1; i.rd[0]=8; c.run(i);
         i={}; i.serial=packet; i.resolve=true; i.mispredict=true; i.resolve_id=c.queue.back().id; c.run(i);
-        i={}; i.serial=packet; c.run(i); empty(c,rng); c.coverage["recovery_priority"]++;
+        i={}; i.serial=packet; c.run(i); c.run(i); empty(c,rng); c.coverage["recovery_priority"]++;
         // A younger queued serial result is rejected and killed by an older branch or trap.
         for (unsigned kind=0;kind<2;kind++) {
             i={}; i.count=1; i.cfi=kind==0 ? 1:0; i.rd[0]=8; c.run(i);
@@ -86,7 +90,7 @@ int main(int argc,char** argv) {
             }
             packet=serial_result(c,0,rng);
             for (unsigned n=0;n<5;n++) {
-                i={}; i.serial=packet; i.retire_ready=0; i.complete={c.result(1,rng),c.result(2,rng)};
+                i={}; i.serial=packet; i.retire_ready=0; i.complete[1]=c.result(n+1,rng);
                 i.read={c.queue.front().destination,c.queue.front().stale,0,0}; c.run(i);
             }
             i.retire_ready=3; c.run(i); empty(c,rng); c.run();

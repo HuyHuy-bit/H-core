@@ -62,6 +62,7 @@ class Check {
     Vrename_bundle dut;
 public:
     unsigned cases = 0, raw = 0, waw = 0, blocked = 0, cut = 0, zero = 0;
+
     void run(const Input& in) {
         ++cases;
         dut.rst_i = in.reset;
@@ -70,6 +71,7 @@ public:
         dut.valid_i = in.valid;
         dut.checkpoint_i = in.checkpoint;
         dut.free_i = in.free;
+        dut.free_count_i = __builtin_popcountll(in.free & ~UINT64_C(1));
         dut.ready_i = in.ready;
         dut.rs1_i = in.rs1[0] | (in.rs1[1] << 5);
         dut.rs2_i = in.rs2[0] | (in.rs2[1] << 5);

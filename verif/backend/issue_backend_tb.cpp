@@ -17,6 +17,7 @@ using packed_bits::get;
 #include <vector>
 
 using Event = std::array<uint32_t, (EVENT_BITS+31)/32>;
+
 struct Entry {
     unsigned id = 0, rd = 0, destination = 0, stale = 0, pc = 0, eligible = 3;
     std::array<unsigned, 2> source{0, 0};
@@ -25,8 +26,11 @@ struct Entry {
     bool cfi = false, done = false, resolved = false, solo = false, queued = true, issued = false;
     Event event{};
 };
+
 struct Branch { unsigned id, slot; };
+
 struct Completion { unsigned id = 0; bool offer = false, solo = false; Event event{}; };
+
 struct Input {
     unsigned count = 0, cfi = 0, solo = 0, retire_ready = 3, resolve_id = 0, ports = 3;
     std::array<unsigned, 2> rd{}, rs1{}, rs2{}, eligible{3, 3};
@@ -36,6 +40,7 @@ struct Input {
     bool reset = false, flush = false, drain = false, resources = true;
     bool resolve = false, grant = true, mispredict = false, trap_ready = false;
 };
+
 class Check {
     Vissue_backend dut;
     std::array<unsigned, 32> committed{};
@@ -44,6 +49,10 @@ class Check {
     unsigned sequence = 0;
     uint64_t order = 0;
     bool wake_pending = false;
+    // the queue's registered wakeup: last cycle's accepted writes
+    unsigned wake_wb = 0; std::array<unsigned, 2> wake_tag{};
+    bool recover_pending = false;  // a mispredict accepted last cycle: this cycle recovers it
+    unsigned recover_id = 0;
 public:
     std::deque<Entry> queue;
     std::vector<Branch> branches;
@@ -52,37 +61,46 @@ public:
     std::map<std::string, unsigned> coverage;
     unsigned cycles = 0, tail = 0;
     Check() { for (unsigned i = 0; i < 32; ++i) committed[i] = i; known[0] = true; }
+
     void require(bool ok, const std::string& what) const {
         if (!ok) throw std::runtime_error("issue backend mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     static uint64_t token(unsigned n) { return UINT64_C(0x9e3779b97f4a7c15)*(n+1); }
+
     auto map() const {
         auto m = committed;
         for (const auto& e : queue) if (e.rd) m[e.rd] = e.destination;
         return m;
     }
+
     uint64_t free() const {
         uint64_t f = ~UINT64_C(1);
         for (auto p : committed) f &= ~(UINT64_C(1) << p);
         for (const auto& e : queue) if (e.rd) f &= ~(UINT64_C(1) << e.destination);
         return f;
     }
+
     uint64_t ready() const {
         uint64_t r = 1;
         for (auto p : committed) r |= UINT64_C(1) << p;
         for (const auto& e : queue) if (e.rd && e.done && !bit(e.event, TRAP_OFFSET)) r |= UINT64_C(1) << e.destination;
         return r;
     }
+
     unsigned checkpoints() const {
         unsigned mask = 0; for (auto b : branches) mask |= 1U << b.slot; return mask;
     }
+
     unsigned locate(unsigned id) const {
         for (unsigned i = 0; i < queue.size(); ++i) if (queue[i].id == id) return i;
         return unsigned(queue.size());
     }
+
     unsigned resident() const {
         return unsigned(std::count_if(queue.begin(), queue.end(), [](const Entry& e) { return e.queued; }));
     }
+
     unsigned retirable() const {
         unsigned n = 0;
         for (const auto& e : queue) {
@@ -92,6 +110,7 @@ public:
         }
         return n;
     }
+
     Completion result(unsigned index, std::mt19937& rng, bool trap = false) const {
         Completion c; const auto& e = queue.at(index); c.id = e.id; c.offer = true;
         for (auto& word : c.event) word = rng();
@@ -103,31 +122,41 @@ public:
         put(c.event, RD_WRITE_MASK_OFFSET, 32, !trap && e.rd ? UINT32_MAX : 0);
         return c;
     }
+
     template<class T> void equal_event(const T& actual, unsigned lane, Event expected, bool trap) {
         put(expected, VALID_OFFSET, 1, 1); put(expected, ORDER_OFFSET, 64, order+lane); put(expected, RETIRED_OFFSET, 1, !trap);
         for (unsigned b = 0; b < EVENT_BITS; ++b)
             require(bit(actual, lane*EVENT_BITS+b) == bit(expected, b), "event bit="+std::to_string(b));
     }
+
     void run(const Input& in = {}) {
         ++cycles;
         const bool active = !in.reset && !in.flush;
         const bool tv = active && !queue.empty() && queue.front().done && bit(queue.front().event, TRAP_OFFSET);
-        const bool trap = tv && in.trap_ready;
-        const auto ri = locate(in.resolve_id);
-        const bool resolve = active && !trap && in.resolve && in.grant && ri < queue.size() && queue[ri].cfi && !queue[ri].resolved;
+        // mispredict recovery follows acceptance by one cycle; the resolver holds its ID and pending traps also stall.
+        const bool recovery = recover_pending && active;
+        // BACKEND_ATOMIC_CONTROL forbids trap acceptance during registered recovery.
+        const bool trap_ready = in.trap_ready && !recovery;
+        const bool trap = tv && trap_ready;
+        const unsigned resolve_id = recovery ? recover_id : in.resolve_id;
+        const bool resolve_offer = !recovery && in.resolve;
+        const auto ri = locate(resolve_id);
+        const bool recover_hold = recovery || (resolve_offer && in.mispredict && ri < queue.size());
+        const bool resolve = active && !tv && resolve_offer && in.grant && ri < queue.size() && queue[ri].cfi && !queue[ri].resolved;
         require(!resolve || queue[ri].issued, "stimulus resolution before issue");
-        const bool recovery = resolve && in.mispredict;
+        const bool mispredict = resolve && in.mispredict;
         const unsigned cp = checkpoints(); unsigned released = 0;
-        if (resolve) for (auto b : branches) if (b.id == in.resolve_id || (recovery && locate(b.id) > ri)) released |= 1U << b.slot;
+        for (auto b : branches)
+            if ((resolve && !mispredict && b.id == resolve_id) || (recovery && (b.id == resolve_id || locate(b.id) > ri))) released |= 1U << b.slot;
         auto speculative = map(); auto available = free(); auto readiness = ready();
-        const unsigned rv = active && !trap && !recovery ? (1U << retirable())-1 : 0;
+        const unsigned rv = active && !recover_hold ? (1U << retirable())-1 : 0;
         unsigned retire = rv & in.retire_ready; if (!(retire&1)) retire = 0;
         unsigned complete = 0, wb = 0; uint64_t reclaim = 0;
         std::array<unsigned, 2> wb_tag{0, 0};
         if (recovery) for (unsigned i = ri+1; i < queue.size(); ++i) if (queue[i].rd) reclaim |= UINT64_C(1) << queue[i].destination;
         for (unsigned lane = 0; lane < 2; ++lane) {
             const auto& c = in.complete[lane]; const auto i = locate(c.id);
-            if (active && !trap && c.offer && i < queue.size() && !queue[i].done && (!recovery || i <= ri)
+            if (active && !tv && c.offer && i < queue.size() && !queue[i].done && (!recover_hold || i <= ri)
                 && !(lane && in.complete[0].offer && c.id == in.complete[0].id)) {
                 complete |= 1U << lane;
                 if (queue[i].rd && !bit(c.event, TRAP_OFFSET)) {
@@ -137,10 +166,10 @@ public:
             }
         }
 
-        // Selection uses program order, never the queue's sparse slots or modular age comparison.
-        const bool stop = !active || trap || recovery;
+        // the oracle selects in program order independently of DUT storage slots.
+        const bool stop = !active || tv || recover_hold;
         const unsigned occupancy = resident();
-        const unsigned ports_eff = in.head_read ? 0:in.ports;
+        const unsigned ports_eff = in.ports;  // the head has its own read ports
         std::vector<std::array<bool, 2>> wake(queue.size());
         bool any_wake = false;
         for (unsigned n = 0; n < queue.size(); ++n) {
@@ -148,7 +177,7 @@ public:
             for (unsigned operand = 0; operand < 2; ++operand) {
                 wake[n][operand] = wake[n][operand] || queue[n].source[operand] == 0;
                 for (unsigned lane = 0; lane < 2; ++lane)
-                    if ((wb & (1U << lane)) && wb_tag[lane] == queue[n].source[operand]) wake[n][operand] = true;
+                    if ((wake_wb & (1U << lane)) && wake_tag[lane] == queue[n].source[operand]) wake[n][operand] = true;
             }
             any_wake |= queue[n].queued && wake[n] != queue[n].ready;
         }
@@ -159,13 +188,15 @@ public:
                     if (queue[n].queued && wake[n][0] && wake[n][1] && (queue[n].eligible & (1U << port))
                         && (port == 0 || pick[0] != int(n))) { pick[port] = int(n); break; }
 
+        // rename admission uses registered readiness and independent resource counts.
         unsigned count = in.count; if ((in.cfi&1) && count) count = 1;
         std::array<unsigned, 2> dest{}, stale{}, s1{}, s2{}; unsigned sr = 0;
         bool enough = occupancy+count <= 16;
         for (unsigned lane = 0; lane < count; ++lane) {
             s1[lane] = speculative[in.rs1[lane]]; s2[lane] = speculative[in.rs2[lane]];
-            sr |= unsigned((readiness >> s1[lane])&1) << (lane*2);
-            sr |= unsigned((readiness >> s2[lane])&1) << (lane*2+1);
+            // rename uses registered readiness; same-cycle writeback wakes the queued entry later.
+            sr |= unsigned((ready() >> s1[lane])&1) << (lane*2);
+            sr |= unsigned((ready() >> s2[lane])&1) << (lane*2+1);
             if (lane && in.rd[0]) {
                 if (in.rs1[1] == in.rd[0]) sr &= ~(1U << 2);
                 if (in.rs2[1] == in.rd[0]) sr &= ~(1U << 3);
@@ -181,13 +212,15 @@ public:
         const unsigned selected = (1U << count)-1;
         const bool needs_cp = selected & in.cfi;
         enough &= queue.size()+count <= 32 && (!needs_cp || cp != 255);
-        const unsigned alloc = active && !trap && !recovery && !in.drain && in.resources && enough ? selected : 0;
+        const unsigned alloc = active && !tv && !recover_hold && !in.drain && in.resources && enough ? selected : 0;
         for (unsigned lane = 0; lane < 2; ++lane)
             require(!(alloc & in.cfi & (1U << lane)) || in.eligible[lane] == 1, "stimulus branch port");
         unsigned cp_slot = 0; while (cp_slot < 8 && (cp & (1U << cp_slot))) ++cp_slot;
         const bool create = alloc && needs_cp;
 
+        // drive renamed, completion and head-read packets before sampling issue.
         dut.queue_skip_i=0; dut.head_read_i=in.head_read;
+        dut.early_valid_i=0; dut.early_destination_i=0; dut.read_early_i=0;
         dut.head_source_i=in.head_sources[0] | (in.head_sources[1] << 6);
         dut.serial_offer_i=0; dut.serial_id_i=0;
         for (unsigned word=0;word<(EVENT_BITS+31)/32;word++) dut.serial_event_i[word]=0;
@@ -201,8 +234,9 @@ public:
             dut.payload_i[2*lane] = uint32_t(token(sequence+lane));
             dut.payload_i[2*lane+1] = uint32_t(token(sequence+lane) >> 32);
         }
-        dut.retire_ready_i = in.retire_ready; dut.trap_ready_i = in.trap_ready; dut.port_ready_i = in.ports;
-        dut.resolve_offer_i = in.resolve; dut.resolve_grant_i = in.grant; dut.resolve_id_i = in.resolve_id; dut.mispredict_i = in.mispredict;
+        dut.retire_ready_i = in.retire_ready; dut.trap_ready_i = trap_ready; dut.port_ready_i = in.ports;
+        dut.resolve_offer_i = resolve_offer; dut.resolve_grant_i = in.grant; dut.resolve_id_i = resolve_id; dut.mispredict_i = in.mispredict;
+        dut.recover_hold_i = recover_hold;
         dut.complete_offer_i = dut.complete_solo_i = dut.complete_id_i = 0;
         for (unsigned w = 0; w < (2*EVENT_BITS+31)/32; ++w) dut.complete_event_i[w] = 0;
         for (unsigned lane = 0; lane < 2; ++lane) {
@@ -220,7 +254,11 @@ public:
         require(dut.trap_valid_o == tv && dut.trap_accept_o == trap, "trap boundary");
         require(dut.head_valid_o == (active && !queue.empty()), "head valid");
         if (!queue.empty()) require(dut.head_id_o == queue.front().id && dut.head_pc_o == queue.front().pc, "head identity/PC");
-        require(dut.checkpoint_accept_o == create && dut.checkpoint_released_o == released, "checkpoint transaction");
+        require(dut.checkpoint_accept_o == create && dut.checkpoint_released_o == released, "checkpoint transaction create="
+            +std::to_string(dut.checkpoint_accept_o)+"/"+std::to_string(create)+" released="+std::to_string(dut.checkpoint_released_o)+"/"+std::to_string(released)
+            +" recovery="+std::to_string(recovery)+" resolve="+std::to_string(resolve)+" reset="+std::to_string(in.reset)
+            +" id="+std::to_string(resolve_id)+" cp="+std::to_string(cp)+"/"+std::to_string(dut.checkpoint_valid_o)+" rcp="+std::to_string(dut.resolve_checkpoint_o)
+            +" ri="+std::to_string(ri)+" size="+std::to_string(queue.size()));
         if (create) require(dut.checkpoint_id_o == cp_slot, "checkpoint slot");
         if (!in.reset) {
             require(dut.checkpoint_valid_o == cp && dut.free_o == free() && dut.ready_o == ready(), "ownership sets");
@@ -257,22 +295,28 @@ public:
             const uint64_t launched = dut.issue_payload_o[2*port] | (uint64_t(dut.issue_payload_o[2*port+1]) << 32);
             require(launched == (issued ? expected.payload : 0), "issue payload");
             for (unsigned operand = 0; operand < 2; ++operand) {
-                const unsigned p = in.head_read ? (port == 0 ? in.head_sources[operand]:0)
-                    : issued ? expected.source[operand] : 0, index = port*2+operand;
+                const unsigned p = issued ? expected.source[operand] : 0, index = port*2+operand;
                 uint32_t value = payload[p]; bool defined = known[p];
                 for (unsigned lane = 0; lane < 2; ++lane) if ((wb & (1U << lane)) && wb_tag[lane] == p) {
+                    // an entry is woken a cycle after the write, so no issue reads through this bypass here.
                     value = unsigned(get(in.complete[lane].event, RD_VALUE_OFFSET, 32)); defined = true;
-                    if (issued) ++coverage["prf_bypass"];
-                    if (in.head_read && port==0) ++coverage["head_bypass_"+std::to_string(operand)+"_"+std::to_string(lane)];
                 }
                 if (defined) require(get(dut.read_data_o, index*32, 32) == value, "PRF payload");
-                if (in.head_read && port==0) {
-                    coverage["head_known_high"] += defined && p>=32;
-                    coverage["head_zero"] += p==0;
-                    coverage["head_free"] += (free()>>p)&1;
-                    coverage["head_reclaimed"] += (reclaim>>p)&1;
-                }
                 require(((dut.read_ready_o >> index)&1) == (active && !trap && ((readiness & ~reclaim) >> p & 1)), "PRF readiness");
+            }
+        }
+        // head ports have no writeback bypass: a register written this cycle reads stale and not ready.
+        for (unsigned operand = 0; operand < 2; ++operand) {
+            const unsigned p = in.head_sources[operand];
+            if (known[p]) require(unsigned(dut.head_data_o >> (operand*32)) == payload[p], "head payload");
+            require(((dut.head_ready_o >> operand)&1) == (active && !trap && ((ready() & ~reclaim) >> p & 1)), "head readiness");
+            if (in.head_read) {
+                for (unsigned lane = 0; lane < 2; ++lane)
+                    if ((wb & (1U << lane)) && wb_tag[lane] == p) ++coverage["head_write_"+std::to_string(operand)+"_"+std::to_string(lane)];
+                coverage["head_known_high"] += known[p] && p>=32;
+                coverage["head_zero"] += p==0;
+                coverage["head_free"] += (free()>>p)&1;
+                coverage["head_reclaimed"] += (reclaim>>p)&1;
             }
         }
 
@@ -280,7 +324,7 @@ public:
         if (in.head_read) {
             unsigned head_ready=0;
             for (unsigned operand=0;operand<2;++operand)
-                head_ready |= unsigned(active && !trap && ((readiness & ~reclaim)>>in.head_sources[operand]&1))<<operand;
+                head_ready |= unsigned(active && !trap && ((ready() & ~reclaim)>>in.head_sources[operand]&1))<<operand;
             ++coverage["head_ready_"+std::to_string(head_ready)];
             ++coverage["head_read"];
             coverage["head_empty"] += queue.empty();
@@ -291,9 +335,7 @@ public:
             coverage["head_flush"] += in.flush;
             coverage["head_trap"] += trap;
             coverage["head_recovery"] += recovery;
-            for (unsigned n=0;n<queue.size();++n)
-                coverage["head_blocks_issue"] += !stop && queue[n].queued && wake[n][0] && wake[n][1]
-                    && (queue[n].eligible & in.ports)!=0;
+            coverage["head_with_issue"] += launches != 0;
             for (unsigned lane=0;lane<2;++lane) {
                 coverage["head_rejected"] += in.complete[lane].offer && !(complete & (1U<<lane));
                 coverage["head_fault_no_write"] += (complete & (1U<<lane)) && bit(in.complete[lane].event,TRAP_OFFSET);
@@ -309,11 +351,11 @@ public:
         coverage["rob_full"] += queue.size() == 32; coverage["prf_full"] += free() == 0;
         coverage["backpressure"] += occupancy && ports_eff == 0 && !stop;
         coverage["stalled_wakeup"] += any_wake && ports_eff == 0 && !stop;
-        coverage["retained_wakeup"] += wake_pending && launches && !wb;
+        coverage["retained_wakeup"] += wake_pending && launches && !wake_wb;
         coverage["unaccepted_broadcast"] += !stop && in.complete[0].offer && !(complete&1);
         for (unsigned port = 0; port < 2; ++port) if (pick[port] >= 0) {
             const auto& e = queue[unsigned(pick[port])];
-            coverage["wakeup_issue"] += wb && wake[unsigned(pick[port])] != e.ready;
+            coverage["wakeup_issue"] += wake_wb && wake[unsigned(pick[port])] != e.ready;
             coverage["zero_source"] += e.source[0] == 0 || e.source[1] == 0;
             coverage["port0_only"] += e.eligible == 1; coverage["port1_only"] += e.eligible == 2;
             coverage["branch_issue"] += e.cfi;
@@ -334,6 +376,9 @@ public:
             coverage["resultless"] += !e.rd && !bit(in.complete[lane].event, TRAP_OFFSET);
         }
         wake_pending = any_wake && ports_eff == 0 && !stop;
+        wake_wb = in.reset ? 0 : wb; wake_tag = wb_tag;
+        recover_pending = !in.reset && !in.flush && !trap && mispredict;
+        recover_id = resolve_id;
 
         if (in.reset) {
             for (unsigned i = 0; i < 32; ++i) committed[i] = i;
@@ -379,6 +424,7 @@ public:
         dut.clk_i = 1; dut.eval(); dut.clk_i = 0; dut.eval();
     }
 };
+
 void drain(Check& c, std::mt19937& rng) {
     for (unsigned limit = 0; !c.queue.empty(); ++limit) {
         c.require(limit < 400, "drain progress");
@@ -389,9 +435,11 @@ void drain(Check& c, std::mt19937& rng) {
         c.run(in);
     }
 }
+
 void fill(Check& c, unsigned entries) {
     for (unsigned n = 0; n < entries; n += 2) { Input in; in.ports = 0; in.count = 2; c.run(in); }
 }
+
 void directed(Check& c, std::mt19937& rng) {
     Input in; in.reset = true; c.run(in);
 
@@ -464,6 +512,7 @@ void directed(Check& c, std::mt19937& rng) {
     in = {}; in.reset = true; c.run(in);
     in = {}; in.drain = true; c.run(in);
 }
+
 void head_reads(Check& c, std::mt19937& rng) {
     Input in; in.retire_ready=0;
     for (unsigned n=0;n<32;n+=2) {
@@ -525,6 +574,7 @@ void head_reads(Check& c, std::mt19937& rng) {
     in={}; in.head_read=true; in.head_sources={63,c.queue[0].destination}; in.reset=true; c.run(in);
     in={}; in.head_read=true; in.head_sources={0,63}; c.run(in);
 }
+
 void random_run(Check& c, std::mt19937& rng, std::mt19937& head_rng, unsigned cycles) {
     for (unsigned step = 0; step < cycles; ++step) {
         Input in; in.head_read=head_rng()%8==0; in.head_sources={unsigned(head_rng()%64),unsigned(head_rng()%64)};
@@ -555,6 +605,7 @@ void random_run(Check& c, std::mt19937& rng, std::mt19937& head_rng, unsigned cy
         c.run(in);
     }
 }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     try {

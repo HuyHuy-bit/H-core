@@ -1,7 +1,6 @@
 `default_nettype none
 // two-wide rename state: speculative rat, committed rat, free list and ready bits.
 module rename_state (
-  // inputs
   input  wire clk_i, rst_i, recover_i, resources_ready_i,
   input  wire branch_recover_i,
   input  wire [191:0] branch_rat_i,
@@ -12,7 +11,6 @@ module rename_state (
   input  wire [11:0] wb_destination_i, commit_destination_i, commit_stale_i,
   input  wire [9:0] commit_rd_i,
 
-  // outputs
   output wire [1:0] accept_o,
   output wire [11:0] source1_o, source2_o, destination_o, stale_o,
   output wire [3:0] source_ready_o,
@@ -20,8 +18,10 @@ module rename_state (
   output wire [191:0] rat_o, committed_o,
   output wire [63:0] free_o, ready_o
 );
+
   logic [191:0] rat_q, rat_d, committed_q, committed_d;
   logic [63:0] free_q, free_d, ready_q, ready_d, ready_view, recovered_free;
+  logic [6:0] free_count_q, free_count_d;  // $countones(free_q)
 
   assign rat_o = rat_q;
   assign committed_o = committed_q;
@@ -39,8 +39,10 @@ module rename_state (
 
   // two-lane rename planning
   rename_bundle planner (
-    .rst_i, .recover_i(recover_i || branch_recover_i), .resources_ready_i, .valid_i, .checkpoint_i,
-    .rs1_i, .rs2_i, .rd_i, .rat_i(rat_q), .free_i(free_q), .ready_i(ready_view),
+    // resources_ready_i is low in a flush, trap or recovery cycle.
+    .rst_i, .recover_i(1'b0), .resources_ready_i, .valid_i, .checkpoint_i,
+    // a write accepted this cycle reaches the new queue entry through the queue's registered wakeup.
+    .rs1_i, .rs2_i, .rd_i, .rat_i(rat_q), .free_i(free_q), .ready_i(ready_q), .free_count_i(free_count_q),
     .accept_o, .source1_o, .source2_o, .destination_o, .stale_o,
     .source_ready_o, .allocation_o
   );
@@ -50,6 +52,13 @@ module rename_state (
     rat_d = rat_q;
     committed_d = committed_q;
     free_d = free_q;
+    // count free tags across commit, allocation and recovery; full recovery reserves 32 mappings.
+    free_count_d = free_count_q;
+    for (int lane = 0; lane < 2; lane++)
+      free_count_d = free_count_d + 7'(commit_i[lane] && commit_rd_i[lane*5 +: 5] != 0)
+                                  - 7'(accept_o[lane] && rd_i[lane*5 +: 5] != 0);
+    if (branch_recover_i) free_count_d = free_count_q + 7'($countones(branch_reclaim_i));
+    if (recover_i || rst_i) free_count_d = 7'd32;
     ready_d = ready_view;
     recovered_free = 64'hfffffffffffffffe;
     for (int arch = 1; arch < 32; arch++)
@@ -97,10 +106,11 @@ module rename_state (
     rat_q <= rat_d;
     committed_q <= committed_d;
     free_q <= free_d;
+    free_count_q <= free_count_d;
     ready_q <= ready_d;
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   // the rob and completion arbiter must supply live, ordered, already accepted events.
   always_ff @(posedge clk_i) begin : ownership_checks
@@ -118,6 +128,7 @@ module rename_state (
             else $fatal(1, "RENAME_STATE_RECLAIM_MAPPING");
       end
       assert (commit_i != 2'b10) else $fatal(1, "RENAME_STATE_COMMIT_PREFIX");
+      assert (free_count_q == 7'($countones(free_q))) else $fatal(1, "RENAME_STATE_FREE_COUNT");
       assert (!free_q[0] && ready_q[0] && rat_q[5:0] == 0 && committed_q[5:0] == 0)
         else $fatal(1, "RENAME_STATE_ZERO");
       for (int lane = 0; lane < 2; lane++) begin

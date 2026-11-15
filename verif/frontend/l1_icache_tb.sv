@@ -1,25 +1,8 @@
 `default_nettype none
-// Replays +stimulus lines "op a b c d e f" (seven hex fields) against l1_icache, acting as fetch; a memory model
-// answers its line requests. Lines are numbered by address[31:5].
-//   0 lookup: line wait expect     wait: look up again after a retry, then wait for the miss's fill or fault
-//                                  expect, checked on the first answer: 0 any, 1 hit, 2 miss
-//   1 prefetch: line wait          offered until accepted; wait 1: then until the cache is idle; 2: one cycle only
-//   2 invalidate: modify line next modify: the line's memory changes at this edge; next: the next line issues too
-//   3 barrier: wait until nothing is outstanding
-//   4 expect request: line way fault (+exact)   5 fault line: line arm (requests for it get an access fault)
-//   6 malformed next response: 2 protocol status, 3 wrong id, 4 uncached data, 6 an access fault with line data
-//   7 idle a cycles    8 expect fatal (last line): then look up the demand line and offer a prefetch every cycle,
-//     and require silence
-//   9 timing: latency (0: random 1..50) ready_delay (ff: random) no_gaps
-//   a continue a cycles before (b=0) or after (b=1) the response of the current or next request
-//   b present an unsolicited response this cycle, once nothing is outstanding at the memory
-// Always checked: hit and fill data against memory as of the answer cycle, only the demand (the latest miss) is
-// delivered or faulted, one outstanding transaction, requests never withdrawn and never for a resident line,
-// prefetches accepted only with nothing in flight, retries only around an install cycle into the set, no duplicate
-// valid tag, fatal only after an injected fault, and watchdogs on the demand and on every line. +exact also checks
-// each request and install way against the expect lines. +trace prints events.
+// replay seven-field hex stimuli against demand/prefetch, fill, protocol and memory-data scoreboards.
 module l1_icache_tb;
   import memory_protocol_pkg::*;
+
   localparam int SETS = 16, MAX_LATENCY = 50, WATCHDOG = 4 * MAX_LATENCY + 64, QUIET = 300;
 
   logic clk = 0;
@@ -61,7 +44,7 @@ module l1_icache_tb;
     return 0;
   endfunction
 
-  // stimulus
+  // stimulus parsing and outstanding-command state
   string path, text;
   int fd, lines = 0, op, cycle = 0, gap = 0, idle_left = 0, sync_due = -1, quiet_left = -1, phase = 0;
   logic [31:0] a, b, c, d, e, f;
@@ -85,12 +68,11 @@ module l1_icache_tb;
   int expect_way[$], install_way = -1;
   int unsigned expect_line[$];
   bit expect_fault[$];
-  // counts reported on PASS
+  // coverage counters reported on PASS
   int lookups = 0, hits = 0, misses = 0, retries = 0, fills = 0, faults = 0, prefetches = 0, requests = 0;
   int installs = 0, invalidates = 0, dropped = 0, prefetch_hits = 0;
 
-  // inputs for this cycle; lines that need no cycle are consumed until one does. Every answer output comes from
-  // registers, so this cycle's answers to last cycle's lookup are already settled here.
+  // drive cycle inputs after registered lookup answers settle; consume cycle-free stimulus lines together.
   task automatic drive();
     {invalidate, lookup_valid, prefetch_valid} = 0;
     {modify_now, lookup_expect} = 0;
@@ -119,6 +101,8 @@ module l1_icache_tb;
         gap = (op <= 1 && !no_gaps && $urandom_range(3) == 0) ? $urandom_range(1, 3) : 0;
       end
       case (op)
+
+        // lookup: line, wait-for-fill/retry, expected answer (0 any, 1 hit, 2 miss).
         0: begin
           if (gap > 0) break;
           if (phase == 1) begin
@@ -142,6 +126,8 @@ module l1_icache_tb;
           else have = 0;
           break;
         end
+
+        // prefetch: line, wait mode (1 wait until idle, 2 single cycle, otherwise hold until accepted).
         1: begin
           if (gap > 0) break;
           if (phase == 1) begin
@@ -154,6 +140,8 @@ module l1_icache_tb;
           else if (prefetch_ready || b == 2) have = 0;
           break;
         end
+
+        // invalidate: optionally modify memory line b; c allows the next command at the same edge.
         2: begin
           invalidate = 1;
           {modify_now, modify_line} = {a[0], b};
@@ -178,6 +166,8 @@ module l1_icache_tb;
           else faulty.delete(a);
           have = 0;
         end
+
+        // inject the next malformed response: status, ID, uncached data or nonzero fault data.
         6: begin
           fault_kind = a;
           have = 0;
@@ -196,6 +186,8 @@ module l1_icache_tb;
           have = 0;
           break;
         end
+
+        // timing: latency (0 random), ready delay (ff random), and no-gaps flag.
         9: begin
           fixed_latency = a;
           ready_delay = b == 'hff ? -1 : b;
@@ -225,7 +217,7 @@ module l1_icache_tb;
     end
   endtask
 
-  // settled outputs of this cycle
+  // score demand/fill data, request ownership, unique tags and injected faults.
   task automatic check();
     if (quiet_left >= 0) begin
       if (!fatal || !busy || hit_valid || miss || fill_valid || fill_fault || prefetch_ready || request_valid
@@ -285,6 +277,7 @@ module l1_icache_tb;
     if (have && cycle - line_since > 4 * WATCHDOG) $fatal(1, "FAIL cycle %0d: line %0d stalled", cycle, lines);
   endtask
 
+  // memory target captures one request and schedules its checked response.
   task automatic accept_request();
     int unsigned line = request.address >> 5;
     mem_response_status_e status = faulty.exists(line) ? MEM_STATUS_ACCESS_FAULT : MEM_STATUS_OK;

@@ -49,12 +49,17 @@ module head_system_backend (
 );
 
   import commit_event_pkg::*;
+
   wire serial_ready, raw_trap_valid, raw_trap_accept;
   wire [2:0] unused_lookup_checkpoint, unused_resolve_checkpoint;
   wire unused_clean, unused_invalidate, unused_fence_i;
   wire [12:0] serial_id, illegal_id;
   wire [1:0] complete_accept;
   commit_event_t raw_trap_event;
+  // the controller reads through the head ports (no writeback bypass), as execution_backend wires it.
+  wire [63:0] head_data;
+  wire [1:0] head_ready;
+  wire unused_head = ^head_data[63:32] ^ head_ready[1];
   wire [1:0] offers = illegal_offer_o ? {1'b0, illegal_ready_i} : complete_offer_i;
   wire [25:0] ids = illegal_offer_o ? {13'd0, illegal_id} : complete_id_i;
   wire [1:0] solos = illegal_offer_o ? 2'b01 : complete_solo_i;
@@ -68,7 +73,7 @@ module head_system_backend (
     .clk_i, .rst_i, .cancel_i(flush_i), .retire_accept_i(retire_accept_o),
     .head_valid_i(head_valid_o), .head_id_i(head_id_o), .head_pc_i(head_pc_o),
     .system_valid_i, .system_id_i, .instruction_i(system_instruction_i),
-    .source_ready_i(read_ready_o[0]), .source_i(read_data_o[31:0]), .order_ready_i(1'b1),
+    .source_ready_i(head_ready[0]), .source_i(head_data[31:0]), .order_ready_i(1'b1),
     .prepare_o(system_prepare_o), .busy_o(system_busy_o),
     .fault_valid_i(raw_trap_valid), .fault_event_i(raw_trap_event),
     .serial_offer_o, .serial_id_o(serial_id), .serial_event_o, .serial_accept_i(serial_accept_o),
@@ -123,12 +128,17 @@ module head_system_backend (
     .serial_ready_o(serial_ready),
     .serial_accept_o,
     .trap_ready_i(trap_accept_o),
+    // as execution_backend: a waiting mispredict the head allows, then the registered recovery cycle
+    .recover_hold_i((resolve_offer_i && mispredict_i && !system_busy_o && !raw_trap_valid) || branch_recover_o),
     .trap_valid_o(raw_trap_valid),
     .trap_accept_o(raw_trap_accept),
     .trap_event_o(raw_trap_event),
     .read_address_i,
     .read_data_o,
     .read_ready_o,
+    .head_address_i(read_address_i[11:0]),
+    .head_data_o(head_data),
+    .head_ready_o(head_ready),
     .head_valid_o,
     .head_id_o,
     .head_pc_o,

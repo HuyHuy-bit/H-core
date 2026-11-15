@@ -12,20 +12,27 @@
 #include <string>
 using packed_bits::put;
 using Event=std::array<uint32_t,(EVENT_BITS+31)/32>;
+
 struct Operation {
     unsigned id=0,kind=0,rs1=0,rs2=0,rd=0,cause=0;
     uint32_t instruction=0,pc=0,source1=0,source2=0,address=0;
     bool store=false,uncached=false;
+
     unsigned size() const { return kind%4; }
+
     unsigned bytes() const { return 1U<<size(); }
+
     unsigned client() const { return !store ? 0:uncached ? 2:1; }
+
     unsigned mask() const { return ((1U<<bytes())-1)<<(address%4); }
+
     uint32_t write_data() const {
         uint32_t out=0;
         for (unsigned b=0;b<bytes();++b) out|=((source2>>(8*b))&255)<<(8*((address+b)%4));
         return out;
     }
 };
+
 struct Bench {
     Vhead_memory_controller d;
     std::mt19937 rng;
@@ -36,10 +43,13 @@ struct Bench {
     bool completed=false,fatal=false;
     unsigned cycles=0,cases=0,cause=0;
     std::map<std::string,unsigned> count;
+
     explicit Bench(unsigned seed):rng(seed) { for (auto& byte:memory) byte=uint8_t(rng()); reset(); }
+
     void require(bool ok,const std::string& why) const {
         if (!ok) throw std::runtime_error("head memory mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     void controls() {
         d.clk_i=0; d.rst_i=0; d.recovery_i=0; d.cancel_i=0; d.memory_valid_i=0;
         d.memory_id_i=0; d.instruction_i=0; d.pc_i=0; d.source_ready_i=0; d.source1_i=0; d.source2_i=0;
@@ -48,6 +58,7 @@ struct Bench {
         d.request_ready_i=0; d.response_valid_i=0;
         for (unsigned n=0;n<(RESPONSE_BITS+31)/32;++n) d.response_i[n]=0;
     }
+
     Operation make(bool store=false,unsigned kind=2,uint32_t address=64,int offset=-16,
                    unsigned rs1=3,unsigned rs2=4,unsigned rd=5) {
         Operation x; x.store=store; x.kind=kind; x.rs1=rs1; x.rs2=store ? rs2:0; x.rd=store ? 0:rd;
@@ -65,13 +76,17 @@ struct Bench {
         else if (!permitted) x.cause=store ? 7:5;
         return x;
     }
+
     void descriptor(const Operation& x) {
         d.memory_valid_i=1; d.memory_id_i=x.id; d.instruction_i=x.instruction; d.pc_i=x.pc;
         d.source1_i=x.rs1 ? x.source1:0xdeadcafe; d.source2_i=x.rs2 ? x.source2:0xbaadfeed;
         d.source_ready_i=3;
     }
+
     void head() { d.head_valid_i=1; d.head_id_i=op.id; d.head_pc_i=op.pc; }
+
     bool live() const { return d.head_valid_i && d.head_id_i==op.id && d.head_pc_i==op.pc; }
+
     Event event() const {
         Event out{};
         put(out,VALID_OFFSET,1,1); put(out,PRIVILEGE_OFFSET,2,3);
@@ -99,9 +114,11 @@ struct Bench {
         }
         return out;
     }
+
     template<class T> void compare(const T& actual,const Event& expected) const {
         for (unsigned n=0;n<expected.size();++n) require(actual[n]==expected[n],"whole event word="+std::to_string(n));
     }
+
     void tick() {
         d.clk_i=0; d.eval();
         bool reading=!d.rst_i && !fatal && !owned && !drain && !d.recovery_i && !d.cancel_i
@@ -157,10 +174,12 @@ struct Bench {
         }
         Verilated::timeInc(1); d.clk_i=1; d.eval(); d.clk_i=0; Verilated::timeInc(1); ++cycles;
     }
+
     void reset() {
         controls(); d.rst_i=1; tick(); controls(); owned=drain=committed=offered=sent=authorized=completed=fatal=false;
         cause=0; ids.fill(0); tick(); require(!d.busy_o,"reset release"); ++count["reset"];
     }
+
     void independence(bool recover=true) {
         d.eval(); Event serial{},fault_event{};
         for (unsigned n=0;n<serial.size();++n) { serial[n]=d.serial_event_o[n]; fault_event[n]=d.fault_event_o[n]; }
@@ -173,6 +192,7 @@ struct Bench {
         if (recover) { d.recovery_i=1; check(); d.recovery_i=0; }
         d.memory_valid_i=0; check(); ++count["independence"];
     }
+
     void start(Operation x,bool checks=false) {
         op=x; cause=x.cause; controls(); descriptor(op); head();
         if (checks) {
@@ -196,32 +216,38 @@ struct Bench {
         controls(); head(); descriptor(op);
         d.instruction_i=~op.instruction; d.source1_i=~op.source1; d.source2_i=~op.source2; d.pc_i=op.pc; d.memory_id_i=op.id;
     }
+
     void block_owner() {
         for (unsigned bit=0;bit<13;++bit) { d.head_id_i=op.id^(1U<<bit); d.issue_allowed_i=1; tick();
             require(!d.request_valid_o && !d.serial_offer_o && !d.fault_offer_o && !d.trap_ready_o,"held owner identity"); }
         head(); d.head_pc_i^=4; tick(); require(!d.request_valid_o && !d.serial_offer_o && !d.fault_offer_o,"held owner PC");
         head(); d.head_valid_i=0; tick(); head(); d.issue_allowed_i=0; ++count["owner_blocked"];
     }
+
     void await_result() {
         for (unsigned n=0;n<8;++n) { d.eval(); if (d.serial_offer_o || d.fault_offer_o || d.trap_ready_o) return; tick(); }
         require(false,"result watchdog");
     }
+
     void accept_serial() {
         d.eval(); require(d.serial_offer_o,"serial acceptance setup");
         d.serial_accept_i=1; tick(); d.serial_accept_i=0; owned=false;
         if (op.store && !op.uncached) { committed=drain=true; ++count["commits"]; }
         ++count["retired"];
     }
+
     void offer() {
         if (!committed) head();
         d.issue_allowed_i=1;
         for (unsigned n=0;n<8;++n) { tick(); if (d.request_valid_o) return; }
         require(false,"bus watchdog");
     }
+
     void send(unsigned stalls=2) {
         for (unsigned n=0;n<stalls;++n) { d.issue_allowed_i=0; tick(); }
         d.request_ready_i=1; tick(); d.request_ready_i=0; require(sent,"request acceptance");
     }
+
     void response(unsigned status=0) {
         cause=status ? (op.store ? 7:5):0;
         for (unsigned n=0;n<(RESPONSE_BITS+31)/32;++n) d.response_i[n]=0;
@@ -239,6 +265,7 @@ struct Bench {
         if (!status && op.store) for (unsigned b=0;b<op.bytes();++b) memory[(op.address+b)%256]=uint8_t(op.source2>>(8*b));
         if (!owned) { drain=committed=false; offered=sent=false; }
     }
+
     void finish() {
         head(); await_result(); independence(!(op.store && !op.uncached && !cause));
         for (unsigned n=0;n<4;++n) {
@@ -262,6 +289,7 @@ struct Bench {
         } else accept_serial();
         if (!drain) { offered=sent=false; controls(); tick(); require(!d.busy_o,"final release"); }
     }
+
     void normal(Operation x,unsigned status=0,bool checks=false,unsigned stalls=2) {
         start(x,checks); if (checks) block_owner();
         if (op.store && !op.uncached && !cause) {
@@ -292,6 +320,7 @@ struct Bench {
             offer(); send(stalls); for (unsigned n=0;n<stalls;++n) tick(); response(status); finish();
         }
     }
+
     void cancel_case(unsigned phase,bool store=false) {
         start(make(store));
         if (phase==1) tick();
@@ -307,6 +336,7 @@ struct Bench {
         }
         offered=sent=false; controls(); tick(); require(!d.busy_o,"cancel release"); ++count["cancel_"+std::to_string(phase)];
     }
+
     void unexpected(unsigned phase) {
         reset();
         if (phase==0) { start(make(true)); d.admit_valid_i=1; d.admit_id_i=op.id; tick(); }
@@ -322,6 +352,7 @@ struct Bench {
         require(d.fatal_sources_o==8 && d.fatal_reason_o==64,"unsolicited response diagnostics");
         ++count["response_race_"+std::to_string(phase)]; reset();
     }
+
     void directed() {
         for (bool store:{false,true}) for (unsigned kind:{0U,1U,2U,4U,5U}) {
             if (store && kind>=4) continue;
@@ -366,6 +397,7 @@ struct Bench {
         start(make(true)); d.admit_valid_i=1; d.admit_id_i=op.id; accept_serial(); reset(); ++count["reset_committed"];
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

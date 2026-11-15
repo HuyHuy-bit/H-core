@@ -16,6 +16,8 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   input  wire [12:0] serial_id_i,
   input  commit_event_pkg::commit_event_t serial_event_i,
   input  wire trap_take_i,
+  input  wire recover_hold_i,
+
   output logic [1:0] allocate_ready_o, allocate_accept_o,
   output logic [25:0] allocate_id_o,
   output logic [1:0] complete_ready_o, complete_accept_o,
@@ -34,18 +36,21 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   output logic [5:0] occupancy_o,
   output logic identity_drain_o
 );
+
   import commit_event_pkg::*;
 `ifndef SYNTHESIS
   initial begin
     assert (COMMIT_SLOTS == 2 && COMMIT_EVENT_SHA256 != "") else $fatal(1, "ROB2_EVENT_SCHEMA");
   end
 `endif
+
+  // ROB entries and generation ownership
   logic [31:0] valid_q, done_q, cfi_q, resolved_q, solo_q, exhausted_q;
   logic [7:0] generation_q [32], next_generation_q [32];
   logic [4:0] rd_q [32];
   logic [31:0] pc_q [32];
   logic [5:0] destination_q [32], stale_q [32];
-  // Hardware entries retain trap/prediction and next-PC/trap-value fields; TRACE adds full reference events.
+  // hardware stores trap/control fields; TRACE adds full reference events.
   logic [31:0] trap_q;
   logic [16:0] info_q [32];
   logic [31:0] aux_q [32];
@@ -57,6 +62,7 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   logic [4:0] resolve_age;
   logic clear_window;
 
+  // head, tail and recovery views
   assign second_head = head_q + 5'd1;
   assign second_tail = tail_q + 5'd1;
   assign resolve_slot = resolve_id_i[4:0];
@@ -67,15 +73,19 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   assign head_pc_o = pc_q[head_q];
   assign head_id_o = {generation_q[head_q], head_q};
   assign clear_window = flush_i || trap_accept_o;
+  // registered trap, recovery and serial ownership hold younger handshakes without accept-to-accept paths.
+  wire hold = flush_i || trap_valid_o;
   wire serial_selected = serial_offer_i && serial_ready_o;
 
   // serialized head retirement
-  assign serial_ready_o = head_valid_o && !clear_window && !branch_recover_o && !drained_i
+  assign serial_ready_o = head_valid_o && !recover_hold_i && !drained_i
       && !done_q[head_q] && solo_q[head_q] && !cfi_q[head_q] && serial_id_i == head_id_o
       && serial_event_i.valid && serial_event_i.retired && !serial_event_i.trap
       && serial_event_i.pc_before == pc_q[head_q] && serial_event_i.rd_addr == rd_q[head_q]
       && serial_event_i.rd_write_mask == (rd_q[head_q] == 0 ? 32'd0 : 32'hffffffff)
-      && (rd_q[head_q] != 0 || serial_event_i.rd_value == 0);
+      && (rd_q[head_q] != 0 || serial_event_i.rd_value == 0)
+      // lane-zero completion has priority over serial register writes.
+      && !(complete_offer_i[0] && destination_q[head_q] != 0);
   assign serial_accept_o = serial_selected && retire_accept_o[0];
 
   // precise trap delivery
@@ -89,17 +99,20 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   end
 
   // branch resolution
-  assign resolve_ready_o = !rst_i && !clear_window && valid_q[resolve_slot]
+  assign resolve_ready_o = !rst_i && !hold && valid_q[resolve_slot]
       && generation_q[resolve_slot] == resolve_id_i[12:5]
       && cfi_q[resolve_slot] && !resolved_q[resolve_slot];
   assign resolve_accept_o = resolve_offer_i && resolve_take_i && resolve_ready_o;
-  assign branch_recover_o = resolve_accept_o && mispredict_i;
+  // mispredict recovery follows acceptance by one cycle; resolve_id_i stays held until then.
+  logic recover_q;
+  always_ff @(posedge clk_i) recover_q <= !rst_i && !clear_window && resolve_accept_o && mispredict_i;
+  assign branch_recover_o = recover_q && !flush_i;
 
   // allocation readiness and identities
   assign allocate_id_o = {{next_generation_q[second_tail], second_tail}, {next_generation_q[tail_q], tail_q}};
   always_comb begin
     allocate_ready_o = 0;
-    if (!rst_i && !clear_window && !branch_recover_o && !drained_i && !serial_selected) begin
+    if (!rst_i && !hold && !recover_hold_i && !drained_i && !serial_offer_i) begin
       allocate_ready_o[0] = count_q < 32 && !exhausted_q[tail_q];
       allocate_ready_o[1] = allocate_ready_o[0] && count_q < 31 && !exhausted_q[second_tail];
     end
@@ -113,10 +126,10 @@ module reorder_buffer #(parameter bit TRACE = 1) (
     complete_destination_o = 0;
     for (int lane = 0; lane < 2; lane++) begin
       complete_destination_o[lane*6 +: 6] = destination_q[complete_id_i[lane*13 +: 5]];
-      complete_ready_o[lane] = !rst_i && !clear_window && !serial_selected && valid_q[complete_id_i[lane*13 +: 5]]
+      complete_ready_o[lane] = !rst_i && !hold && valid_q[complete_id_i[lane*13 +: 5]]
         && generation_q[complete_id_i[lane*13 +: 5]] == complete_id_i[lane*13+5 +: 8]
         && !done_q[complete_id_i[lane*13 +: 5]]
-        && (!branch_recover_o || 5'(complete_id_i[lane*13 +: 5] - head_q) <= resolve_age);
+        && (!recover_hold_i || 5'(complete_id_i[lane*13 +: 5] - head_q) <= resolve_age);
     end
     if (complete_offer_i[0] && complete_id_i[12:0] == complete_id_i[25:13])
       complete_ready_o[1] = 0;
@@ -127,10 +140,10 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   always_comb begin
 
     retire_valid_o = 0;
-    if (!rst_i && !clear_window && !branch_recover_o) begin
+    if (!rst_i && !flush_i && !recover_hold_i) begin
       retire_valid_o[0] = serial_selected || (count_q != 0 && done_q[head_q] && !trap_q[head_q]
         && (!cfi_q[head_q] || resolved_q[head_q]));
-      // a serial head retirement (never done) retires alone; a done solo head (an early cached load) may pair.
+      // serial service retires alone; a completed early load at the head may pair.
       retire_valid_o[1] = retire_valid_o[0] && count_q > 1 && done_q[second_head]
         && !trap_q[second_head] && (!cfi_q[second_head] || resolved_q[second_head])
         && done_q[head_q] && !solo_q[second_head];
@@ -232,7 +245,7 @@ module reorder_buffer #(parameter bit TRACE = 1) (
     end
   end
 
-  // retire/trap view: hardware fields from the per-entry state, everything else from the trace record
+  // retire/trap view combines hardware entry fields with optional trace metadata.
   function automatic commit_event_t stored(logic [4:0] slot, commit_event_t trace);
     stored = trace;
     stored.pc_before = pc_q[slot];
@@ -248,6 +261,7 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   assign head_event = stored(head_q, trace_event[0]);
   assign second_event = stored(second_head, trace_event[1]);
 
+  // optional retirement trace storage
   if (TRACE) begin : trace
     commit_event_t event_q [32];
     always_ff @(posedge clk_i)
@@ -257,12 +271,14 @@ module reorder_buffer #(parameter bit TRACE = 1) (
   end else begin : physical
     assign trace_event = '0;
   end
+  // retirement and identity assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin
-      assert (!serial_accept_o || (retire_accept_o == 1 && complete_accept_o == 0 && allocate_accept_o == 0))
+      assert (!serial_accept_o || (retire_accept_o == 1 && allocate_accept_o == 0))
         else $fatal(1, "ROB2_SERIAL_ATOMIC");
       assert (count_q <= 32 && $countones(valid_q) == int'(count_q)) else $fatal(1, "ROB2_COUNT");
+      assert (!(branch_recover_o || (resolve_accept_o && mispredict_i)) || recover_hold_i) else $fatal(1, "ROB2_RECOVER_HOLD");
       for (int slot = 0; slot < 32; slot++)
         assert (valid_q[slot] == (6'(5'(5'(slot) - head_q)) < count_q)) else $fatal(1, "ROB2_WINDOW");
       assert (!drained_i || (count_q == 0 && complete_offer_i == 0 && !resolve_offer_i && allocate_i == 0))

@@ -1,5 +1,5 @@
 `default_nettype none
-// RV32M producer with a result holder: multiply takes two edges; division holds the operation for 34 edges.
+// RV32M producer with a result holder: multiply takes three edges; division holds the operation for 34 edges.
 module muldiv_unit (
   input  wire clk_i, rst_i, flush_i,
   input  wire recover_i,
@@ -8,12 +8,16 @@ module muldiv_unit (
   input  wire [12:0] id_i,
   input  wire [31:0] instruction_i, pc_i, source1_i, source2_i,
   input  wire take_i,
+
   output wire ready_o,
   output wire valid_o,
   output logic [12:0] id_o,
-  output commit_event_pkg::commit_event_t event_o
+  output commit_event_pkg::commit_event_t event_o,
+  output wire held_o             // a result is held, before recovery gating
 );
+
   import commit_event_pkg::*;
+
   logic op_q, start_q, hold_q;
   logic [12:0] op_id_q;
   logic [31:0] instruction_q, pc_q, a_q, b_q;
@@ -21,6 +25,9 @@ module muldiv_unit (
   logic [31:0] quotient_q, divisor_q;
   logic [5:0] count_q;
   logic signed [63:0] product;
+  // multiply pipeline: four registered 17x17 partial products, then their sum.
+  logic signed [33:0] ll_q, lh_q, hl_q, hh_q;
+  logic partial_q;
   logic [31:0] result;
   commit_event_t built;
 
@@ -29,13 +36,16 @@ module muldiv_unit (
     return flush_i || (recover_i && 5'(slot - head_slot_i) > 5'(recover_slot_i - head_slot_i));
   endfunction
 
+  // operation progress and completion capacity
   wire [2:0] f3 = instruction_q[14:12];
   wire divide = f3[2];
-  wire done = divide ? start_q && count_q == 0 : 1'b1;
+  wire done = divide ? start_q && count_q == 0 : partial_q;
   wire hold_free = !hold_q || take_i;
   wire advance = op_q && done && hold_free;
-  assign ready_o = !rst_i && !flush_i && (!op_q || advance);
-  assign valid_o = hold_q && !rst_i && !killed(id_o[4:0]);
+  // offers use registered occupancy; kill clears the holder and the ROB rejects killed results.
+  assign ready_o = !rst_i && (!op_q || advance);
+  assign valid_o = hold_q && !rst_i;
+  assign held_o = hold_q;
 
   // arithmetic
   wire a_signed = f3 inside {3'd1, 3'd2, 3'd4, 3'd6};
@@ -43,8 +53,19 @@ module muldiv_unit (
   wire a_negative = a_signed && a_q[31];
   wire b_negative = b_signed && b_q[31];
   wire [32:0] trial = {remainder_q, quotient_q[31]} - {1'b0, divisor_q};
+  wire signed [16:0] a_high = {a_signed && a_q[31], a_q[31:16]}, a_low = {1'b0, a_q[15:0]};
+  wire signed [16:0] b_high = {b_signed && b_q[31], b_q[31:16]}, b_low = {1'b0, b_q[15:0]};
+  wire signed [63:0] partial_sum = (64'(hh_q) <<< 32) + (64'(lh_q) <<< 16) + (64'(hl_q) <<< 16) + 64'(ll_q);
+  always_ff @(posedge clk_i) begin
+    ll_q <= a_low * b_low;
+    lh_q <= a_low * b_high;
+    hl_q <= a_high * b_low;
+    hh_q <= a_high * b_high;
+    // partial products belong to the operands held for the preceding cycle.
+    partial_q <= !rst_i && op_q && !advance;
+  end
   always_comb begin
-    product = $signed({a_signed && a_q[31], a_q}) * $signed({b_signed && b_q[31], b_q});
+    product = partial_sum;
     if (!divide) result = f3 == 0 ? product[31:0] : product[63:32];
     else if (!f3[1]) result = a_negative != b_negative && b_q != 0 ? -quotient_q : quotient_q;
     else result = a_negative ? -remainder_q : remainder_q;
@@ -70,6 +91,7 @@ module muldiv_unit (
     end
   end
 
+  // operation, divider and result state
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       op_q <= 0;
@@ -113,6 +135,7 @@ module muldiv_unit (
       end
     end
   end
+  // producer handshake assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i && !flush_i) begin

@@ -24,7 +24,7 @@ static perf_attribution::Frame attribution_frame(Vcpu_top& dut,uint64_t cycle,bo
     f.wb=BACKEND(wb_accept_o);
     f.fetch_valid=dut.fetch_valid_o; f.redirect=dut.redirect_o;
     f.fetch_enabled=CORE(frontend__DOT__enable_i); f.fetch_hold=CORE(fetch_hold);
-    f.frontend_state=CORE(frontend__DOT__state_q);
+    f.frontend_state=CORE(frontend__DOT__cached__DOT__state_q);
     f.fetch_lanes=dut.fetch_valid_o; f.recycle_state=CORE(recycle_q);
     f.rob_done=ROB(done_q); f.rob_solo=ROB(solo_q);
     f.resolve_offer=BACKEND(resolve_valid_o); f.resolve_grant=BACKEND(resolve_grant_i);

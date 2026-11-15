@@ -10,7 +10,7 @@ module branch_predictor_tb;
   wire [63:0] target;
   wire [23:0] checkpoint;
   branch_predictor dut (
-    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .taken_o(taken), .target_o(target),
+    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .target_i(64'd0), .taken_o(taken), .target_o(target),
     .take_i(take), .checkpoint_o(checkpoint), .redirect_i(redirect), .repair_i(repair),
     .repair_checkpoint_i(12'd0), .retire_i(retire), .retire_instruction_i(retire_instruction),
     .retire_pc_i(retire_pc), .retire_next_i(retire_next)
@@ -22,6 +22,7 @@ module branch_predictor_tb;
   function automatic logic [31:0] at(input logic [7:0] index, ghr);
     return {22'd0, index ^ ghr, 2'b00};
   endfunction
+
   // retire one taken branch training counter `index` under the current committed history.
   task automatic train_taken(input logic [7:0] index);
     retire = 2'b01;

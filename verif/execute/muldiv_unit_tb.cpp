@@ -15,9 +15,12 @@ using packed_bits::bit;
 using packed_bits::put;
 using Event = std::array<uint32_t, (EVENT_BITS+31)/32>;
 constexpr unsigned DIVIDE_EDGES = 33;  // start edge plus 32 restoring steps before the result may move
+constexpr unsigned MULTIPLY_EDGES = 1; // the partial-product edge before the result may move
 
 struct Op { bool valid = false; unsigned id = 0, edges = 0; uint32_t instruction = 0, pc = 0, a = 0, b = 0; };
+
 struct Held { bool valid = false; unsigned id = 0; Event event{}; };
+
 struct Inputs { bool reset = false, flush = false, recover = false, take = false, launch = false;
                 unsigned recover_slot = 0, head = 0; Op op; };
 
@@ -45,12 +48,17 @@ struct Check {
     void require(bool ok, const std::string& what) {
         if (!ok) throw std::runtime_error("muldiv mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     static bool divide(const Op& o) { return (o.instruction >> 14) & 1; }
-    static bool done(const Op& o) { return !divide(o) || o.edges >= DIVIDE_EDGES; }
+
+    static bool done(const Op& o) { return o.edges >= (divide(o) ? DIVIDE_EDGES : MULTIPLY_EDGES); }
+
     static bool killed(const Inputs& in, unsigned id) {
         return in.flush || (in.recover && ((id - in.head) & 31) > ((in.recover_slot - in.head) & 31));
     }
+
     static uint32_t field(const Event& e, unsigned offset, unsigned width) { return packed_bits::get32(e, offset, width); }
+
     void drive(const Inputs& in, bool launch) {
         dut.rst_i = in.reset; dut.flush_i = in.flush; dut.recover_i = in.recover;
         dut.recover_slot_i = in.recover_slot; dut.head_slot_i = in.head; dut.take_i = in.take;
@@ -58,18 +66,25 @@ struct Check {
         dut.pc_i = in.op.pc; dut.source1_i = in.op.a; dut.source2_i = in.op.b;
         dut.eval();
     }
+
     bool hold_free(const Inputs& in) const { return !held.valid || in.take; }
+
     bool advance(const Inputs& in) const { return op.valid && done(op) && hold_free(in); }
-    bool ready(const Inputs& in) const { return !in.reset && !in.flush && (!op.valid || advance(in)); }
-    bool valid(const Inputs& in) const { return held.valid && !in.reset && !killed(in, held.id); }
+    // a kill clears the result at the edge; the reorder buffer does not accept a killed result, so it stays offered
+    bool ready(const Inputs& in) const { return !in.reset && (!op.valid || advance(in)); }
+
+    bool valid(const Inputs& in) const { return held.valid && !in.reset; }
+
     void observe(const Inputs& in) {
         require(bool(dut.ready_o) == ready(in), "ready");
         require(bool(dut.valid_o) == valid(in), "valid");
+        require(bool(dut.held_o) == held.valid, "held");
         if (valid(in)) {
             require(dut.id_o == held.id, "id");
             for (unsigned b = 0; b < EVENT_BITS; b++) require(bit(dut.event_o, b) == bit(held.event, b), "event bit="+std::to_string(b));
         }
     }
+
     void cover(const Inputs& in) {
         if (in.reset) return;
         const bool kills = in.flush || in.recover;
@@ -122,6 +137,7 @@ static uint32_t operand(std::mt19937& rng) {
     static const uint32_t edges[] = {0, 1, 2, 3, 0x7fffffffU, 0x80000000U, 0x80000001U, 0xfffffffeU, 0xffffffffU};
     return rng() % 3 ? rng() : edges[rng() % 9];
 }
+
 static Op random_op(std::mt19937& rng, unsigned head, unsigned f3) {
     Op o;
     o.id = ((rng() & 255) << 5) | ((head + rng() % 32) & 31);
@@ -131,12 +147,12 @@ static Op random_op(std::mt19937& rng, unsigned head, unsigned f3) {
     return o;
 }
 
-// Directed: from an empty unit with a free holder, results appear exactly 2 (mul) or 35 (divide) cycles after launch.
+// Directed: from an empty unit with a free holder, results appear exactly 3 (mul) or 35 (divide) cycles after launch.
 static void latency(Check& c, std::mt19937& rng) {
     for (unsigned f3 = 0; f3 < 8; f3++) {
         Inputs in; in.launch = true; in.op = random_op(rng, 0, f3); in.op.id &= ~31U;
         c.step(in);
-        const unsigned expected = f3 >= 4 ? DIVIDE_EDGES + 2 : 2;
+        const unsigned expected = (f3 >= 4 ? DIVIDE_EDGES : MULTIPLY_EDGES) + 2;
         unsigned waited = 1;
         for (Inputs idle; !c.dut.valid_o; waited++) { c.require(waited < 64, "latency progress"); c.step(idle); }
         c.require(waited == expected, "latency f3="+std::to_string(f3)+" waited="+std::to_string(waited));
@@ -173,7 +189,7 @@ int main(int argc, char** argv) {
             in.flush = rng() % (phase == 3 ? 40 : 400) == 0;
             in.recover = rng() % (phase == 2 ? 6 : 40) == 0;
             in.recover_slot = (head + rng() % 32) & 31;
-            in.take = c.valid(in) && rng() % (phase == 1 ? 48 : 2) == 0;
+            in.take = c.valid(in) && !Check::killed(in, c.held.id) && rng() % (phase == 1 ? 48 : 2) == 0;
             if (c.ready(in) && rng() % 3) {
                 in.launch = true;
                 in.op = random_op(rng, head, rng() % 4 ? rng() % 4 : 4 + rng() % 4);

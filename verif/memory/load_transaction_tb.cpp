@@ -16,6 +16,7 @@ struct Load {
     uint32_t address=0, cause=0;
     bool unsign=false, uncached=false, head=false, fault=false;
 };
+
 struct Input {
     bool reset=false, launch=false, kill=false, take=false, permit=false, head=false;
     bool request_ready=false, response=false;
@@ -23,22 +24,28 @@ struct Input {
     Load load;
 };
 enum Phase {IDLE, WAIT, OFFER, PENDING, OUTPUT, FATAL};
+
 struct Timing { bool fast=false; unsigned controls=0; };
+
 struct Bench {
     Vload_transaction d;
     std::mt19937 rng;
     unsigned cycles=0, cases=0, transaction=0;
     std::map<std::string, unsigned> count;
     std::array<uint8_t,32> bytes{};
+
     explicit Bench(unsigned seed): rng(seed) {}
+
     void require(bool good, const std::string& text) const {
         if (!good) throw std::runtime_error("load transaction mismatch cycle="+std::to_string(cycles)+": "+text);
     }
+
     uint32_t word(unsigned start) const {
         uint32_t result=0;
         for (unsigned b=0;b<4;++b) result |= uint32_t(bytes.at(start+b))<<(8*b);
         return result;
     }
+
     uint32_t value(const Load& l) const {
         uint32_t result=0;
         unsigned width=1U<<l.size;
@@ -47,6 +54,7 @@ struct Bench {
             result |= ~((1U<<(8*width))-1);
         return result;
     }
+
     void step(Phase phase, const Load& held, Input i={}, unsigned response_status=0) {
         d.clk_i=0; d.rst_i=i.reset; d.launch_i=i.launch; d.kill_i=i.kill; d.take_i=i.take;
         d.id_i=i.load.id; d.address_i=i.load.address; d.size_i=i.load.size;
@@ -98,17 +106,20 @@ struct Bench {
         require(d.data_o==(valid && !result_fault ? value(held):0),"load extraction/sign/data suppression");
         d.clk_i=1; d.eval(); ++cycles;
     }
+
     void reset(Phase phase=IDLE, Load l={}, unsigned status=0) {
         Input i; i.reset=true; step(phase,l,i,status); transaction=0;
         count["reset_"+std::to_string(phase)]++;
         step(IDLE,{});
     }
+
     Input noise() {
         Input i;
         i.load={unsigned(rng()%8192),unsigned(rng()%3),uint32_t(rng()),0,bool(rng()%2),bool(rng()%2),true,false};
         i.permit=rng()%2; i.head=rng()%2; i.head_id=rng()%8192;
         return i;
     }
+
     Input post_issue(const Load& l, unsigned controls) {
         Input i=noise();
         if (controls) {
@@ -117,6 +128,7 @@ struct Bench {
         }
         return i;
     }
+
     void run(Load l, unsigned cancel=0, unsigned status=0, int reset_phase=-1, Timing timing={}) {
         ++cases;
         Input i=noise(); i.launch=true; i.load=l;
@@ -196,6 +208,7 @@ struct Bench {
         if (!cancel && timing.controls==2) ++count["permission_dropped"];
         step(IDLE,{});
     }
+
     void bad_response(unsigned kind, bool uncached, bool stale=false) {
         reset();
         Load l{8191,0,uncached ? 0x10000003U:0x43U,0,false,uncached,true,false};
@@ -225,6 +238,7 @@ struct Bench {
         if (stale) ++count["stale_malformed"];
         reset(FATAL,l);
     }
+
     void negative(const std::string& name) {
         reset(); Input i; Load l{5,0,0,0,false,true,true,false};
         if (name=="capacity" || name=="mmio-kill") {
@@ -249,6 +263,7 @@ struct Bench {
         throw std::runtime_error("negative assertion did not fire");
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

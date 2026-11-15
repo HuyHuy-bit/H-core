@@ -26,14 +26,17 @@ package core_pkg;
   function automatic logic in_region(input logic [31:0] address, base, size);
     return address >= base && address - base < size;
   endfunction
+
   function automatic logic executable(input logic [31:0] address);
     return in_region(address, BRAM_BASE, BRAM_SIZE) && BRAM_EXECUTE;
   endfunction
+
   function automatic logic accessible(input logic [31:0] address, input logic write_access);
     return (in_region(address, BRAM_BASE, BRAM_SIZE) && (write_access ? BRAM_WRITE : BRAM_READ))
       || (in_region(address, UART_BASE, UART_SIZE) && (write_access ? UART_WRITE : UART_READ))
       || (in_region(address, GPIO_BASE, GPIO_SIZE) && (write_access ? GPIO_WRITE : GPIO_READ));
   endfunction
+
   function automatic logic cached(input logic [31:0] address);
     return in_region(address, BRAM_BASE, BRAM_SIZE) && BRAM_CACHEABLE;
   endfunction

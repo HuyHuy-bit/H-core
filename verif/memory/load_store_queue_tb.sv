@@ -1,6 +1,5 @@
 `default_nettype none
-// full-size lsq random test (lq8/sq8/rob32) against an independent rob-order byte scoreboard:
-// dual allocate/retire, wrap, squash, flush, stale updates, committed-owner forwarding, load-take backpressure.
+// full-size LSQ traffic checks dual allocation/retirement, recovery and forwarding against an independent ROB ledger.
 module load_store_queue_tb;
   localparam int ROB = 32, LQ = 8, SQ = 8, CYCLES = 200000;
   localparam logic [1:0] NONE = 0, LOAD = 1, STORE = 2;

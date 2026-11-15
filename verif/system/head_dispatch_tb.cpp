@@ -9,14 +9,16 @@
 #include <string>
 
 struct Input {
-    bool reset=false, flush=false, drain=false, recover=false, head=false, retire=false, memory=false;
+    bool reset=false, flush=false, drain=false, recover=false, head=false, retire=false, memory=false, hold=false;
     unsigned source2=0;
     unsigned valid=0, serial=0, cfi=0, accept=0, head_id=0, branch_id=0, serial_id=0;
     uint32_t head_pc=0;
     std::array<unsigned,2> id{}, source{};
     std::array<uint32_t,2> instruction{}, pc{};
 };
+
 struct Owner { unsigned id, source; uint32_t instruction, pc; unsigned source2; bool memory; };
+
 class Check {
     Vhead_dispatch dut;
 public:
@@ -24,26 +26,34 @@ public:
     Owner owner{};
     uint64_t cycles=0;
     std::map<std::string,uint64_t> coverage;
+
     void require(bool value, const std::string& what) const {
         if (!value) throw std::runtime_error("head dispatch mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     static unsigned position(unsigned slot, unsigned head) {
         for (unsigned n=0;n<32;n++) if ((head+n)%32==slot) return n;
         throw std::runtime_error("invalid slot");
     }
+    // the caller holds dispatch in every flush and recovery cycle, and may hold it in others
+    static bool blocked(const Input& in) { return in.reset || in.flush || in.drain || in.recover || in.hold; }
+
     unsigned selected(const Input& in) const {
-        if (in.reset || in.flush || in.drain || in.recover || !(in.valid&1)) return 0;
+        if (blocked(in) || !(in.valid&1)) return 0;
         // A held load/store admits younger non-serial work; a held system operation admits nothing.
         if (busy && (!owner.memory || (in.serial&1))) return 0;
         if (in.valid==3 && !(in.cfi&1) && in.serial==0) return 3;
         return 1;
     }
+
     bool at_head(const Input& in) const {
         return busy && in.head && in.head_id==owner.id && in.head_pc==owner.pc
-            && !in.reset && !in.flush && !in.drain && !in.recover;
+            && !blocked(in);
     }
+
     void step(const Input& in) {
         dut.clk_i=0; dut.rst_i=in.reset; dut.flush_i=in.flush; dut.drained_i=in.drain;
+        dut.hold_i=in.flush || in.recover || in.hold;
         dut.valid_i=in.valid; dut.serial_i=in.serial; dut.cfi0_i=in.cfi&1;
         dut.instruction_i=in.instruction[0];
         dut.pc_i=in.pc[0];
@@ -58,7 +68,8 @@ public:
         const unsigned dispatch=selected(in);
         require(dut.dispatch_valid_o==dispatch,"selected prefix");
         require(dut.dispatch_solo_o==(dispatch&in.serial),"solo reservation");
-        const unsigned queued=(in.reset || in.flush || in.drain || in.recover || (busy && !owner.memory)) ? 0 : in.accept&~in.serial&3;
+        const unsigned queued=(blocked(in) || (busy && !owner.memory)) ? 0 : in.accept&~in.serial&3;
+        if (in.hold && !in.flush && !in.recover && in.valid) coverage["hold_blocked"]++;
         require(dut.queue_dispatch_o==queued,"IQ admission");
         require(dut.busy_o==busy && dut.killed_o==killed,"descriptor ownership");
         require(dut.owner_valid_o==at_head(in),"full head identity and PC");
@@ -132,22 +143,27 @@ public:
         dut.clk_i=1; dut.eval(); cycles++;
     }
 };
+
 uint32_t csr(unsigned kind, unsigned rs, unsigned rd=1) {
     return 0x34000073u | kind<<12 | rs<<15 | rd<<7;
 }
+
 Input capture(unsigned id, unsigned source, uint32_t instruction=csr(1,5)) {
     Input in; in.valid=3; in.serial=1; in.accept=1;
     in.id={id,(id+1)%8192}; in.source={source,63};
     in.instruction={instruction,0x00500113}; in.pc={0x80000000u+id*4,0x80000004u+id*4};
     return in;
 }
+
 Input matching(const Check& check) {
     Input in; in.head=true; in.head_id=check.owner.id; in.head_pc=check.owner.pc;
     in.valid=3; in.serial=3; in.instruction={0xffffffffu,0x12345678}; in.source={63-check.owner.source,0};
     in.source2=63-check.owner.source2; in.memory=!check.owner.memory;
     return in;
 }
+
 void clear(Check& check) { Input in; in.flush=true; check.step(in); }
+
 void directed(Check& check) {
     Input in; in.reset=true; check.step(in);
     for (unsigned valid : {0u,1u,3u}) for (unsigned serial=0;serial<4;serial++) for (unsigned cfi=0;cfi<4;cfi++) {
@@ -178,6 +194,7 @@ void directed(Check& check) {
     check.step(capture(8191,3)); in=matching(check); in.retire=true; in.serial_id=8191; check.step(in);
     check.step(capture(31,4)); clear(check);
 }
+
 Input memory_capture(unsigned kind, unsigned base, unsigned data, unsigned id=8191) {
     const unsigned funct=std::array<unsigned,8>{0,1,2,4,5,0,1,2}[kind];
     const unsigned rs1=base ? 5:0, rs2=data ? (data==base ? rs1:6):0, imm=0xa5b;
@@ -185,6 +202,7 @@ Input memory_capture(unsigned kind, unsigned base, unsigned data, unsigned id=81
         : ((imm>>5)<<25 | rs2<<20 | rs1<<15 | funct<<12 | (imm&31)<<7 | 0x23);
     Input in=capture(id,base,instruction); in.memory=true; in.source2=data; return in;
 }
+
 void memory_directed(Check& check) {
     Input in;
     for (unsigned kind=0;kind<8;++kind) for (unsigned base=0;base<64;++base)
@@ -215,6 +233,7 @@ void memory_directed(Check& check) {
         check.step(in); clear(check);
     }
 }
+
 void negative(Check& check,const std::string& name) {
     Input in; in.reset=true; check.step(in);
     if (name=="prefix") { in={}; in.valid=2; }
@@ -242,6 +261,7 @@ void negative(Check& check,const std::string& name) {
     check.step(in);
     throw std::runtime_error("caller assertion did not fire");
 }
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {
@@ -274,6 +294,7 @@ int main(int argc,char** argv) {
                 case 4: in.head_pc^=4; break;
                 case 5: in.head=false; break;
                 case 6: in.retire=true; in.serial_id=check.owner.id; break;
+                case 7: in.hold=true; in.valid=1; break;
                 default: break;
                 }
             }

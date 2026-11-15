@@ -14,12 +14,14 @@ using packed_bits::get;
 #include <string>
 
 using Event=std::array<uint32_t,(EVENT_BITS+31)/32>;
+
 struct Entry {
     unsigned id=0,rd=0,rs=0,tag=0,source=0,stale=0;
     uint32_t pc=0,insn=0;
     bool system=false,branch=false,done=false,resolved=false;
     Event event{};
 };
+
 struct Input {
     bool reset=false,flush=false,drain=false,resolve=false,mispredict=false,offer=true,stale=false,illegal_ready=true,trap_ready=true;
     unsigned count=0,retire=3;
@@ -30,6 +32,7 @@ struct Input {
     std::array<uint32_t,2> data{};
     bool raw_fault=false,noise=false;
 };
+
 struct Bench {
     Vhead_system_backend d;
     CsrModel bank;
@@ -40,29 +43,34 @@ struct Bench {
     std::map<std::string,uint64_t> coverage;
     unsigned tail=0,sequence=0,cycles=0;
     uint64_t order=0;
-    bool pending=false;
+    bool pending=false,recover_pending=false;  // recover_pending: a mispredict accepted last cycle recovers now
     Reply held;
     Entry saved;
     Event base{};
     Bench() { for (unsigned n=0;n<32;n++) committed[n]=n; known[0]=true; }
+
     void require(bool v,const std::string& why) const {
         if (!v) throw std::runtime_error("head system mismatch cycle="+std::to_string(cycles)+" "+why);
     }
+
     std::array<unsigned,32> map() const {
         auto out=committed; for (const auto& e:queue) if (e.rd) out[e.rd]=e.tag; return out;
     }
+
     uint64_t free() const {
         uint64_t result=~uint64_t(1);
         for (unsigned a=1;a<32;a++) result&=~(uint64_t(1)<<committed[a]);
         for (const auto& e:queue) if (e.rd) result&=~(uint64_t(1)<<e.tag);
         return result;
     }
+
     uint64_t ready() const {
         uint64_t result=1;
         for (unsigned a=1;a<32;a++) result|=uint64_t(1)<<committed[a];
         for (const auto& e:queue) if (e.rd && e.done && !get(e.event,TRAP_OFFSET,1)) result|=uint64_t(1)<<e.tag;
         return result;
     }
+
     Event event(const Entry& e,uint32_t value,bool fault=false) const {
         Event out{};
         put(out,VALID_OFFSET,1,1); put(out,PRIVILEGE_OFFSET,2,3);
@@ -74,6 +82,7 @@ struct Bench {
         else if (e.rd) { put(out,RD_ADDR_OFFSET,5,e.rd); put(out,RD_VALUE_OFFSET,32,value); put(out,RD_WRITE_MASK_OFFSET,32,UINT32_MAX); }
         return out;
     }
+
     Event final_event(bool trap) const {
         Event out=base;
         put(out,VALID_OFFSET,1,1); put(out,RETIRED_OFFSET,1,!trap);
@@ -83,19 +92,27 @@ struct Bench {
             put(out,e*EFFECT_BITS+FIELD_OFFSET[f],FIELD_WIDTH[f],held.effects[e][f]);
         return out;
     }
+
     template<class T> void compare(const T& got,unsigned slot,const Event& want,const std::string& name) {
         for (unsigned b=0;b<EVENT_BITS;b++) require(get(got,slot*EVENT_BITS+b,1)==get(want,b,1),name+" bit="+std::to_string(b));
     }
+
     void tick(Input in={}) {
         cycles++;
         const bool active=!in.reset && !in.flush;
-        const bool recovery=active && in.resolve && in.mispredict;
+        // registered mispredict recovery holds younger work for both cycles; pending head faults also block completion.
+        const bool recovery=active && recover_pending;
         const bool fault=active && !queue.empty() && queue.front().done && get(queue.front().event,TRAP_OFFSET,1);
         const bool running=active && !recovery;
         const bool serial=running && pending && held.legal && !held.trap;
         const bool illegal=running && pending && !held.legal;
         const bool trap=running && pending && held.trap;
-        const bool serial_accept=serial && (in.retire&1);
+        const bool hold=recovery || (active && in.resolve && in.mispredict && !(running && pending) && !fault);
+        const bool resolve=active && in.resolve && !fault && !(running && pending) && !queue.empty()
+            && queue.front().branch && !queue.front().resolved;
+        // a lane-zero completion keeps write port zero; a serial retirement that writes waits for it.
+        const bool serial_ready=serial && !hold && !(in.complete[0]>=0 && saved.rd);
+        const bool serial_accept=serial_ready && (in.retire&1);
         const bool illegal_accept=illegal && in.illegal_ready;
         const bool trap_accept=trap && in.trap_ready;
         auto candidate=std::find_if(queue.begin(),queue.end(),[](const auto& e){return e.system && !e.done;});
@@ -106,8 +123,8 @@ struct Bench {
             && queue.front().id==offered_id && ((ready()>>source)&1);
         const bool prepare_trap=running && !pending && fault;
         unsigned rv=0;
-        if (serial) rv=1;
-        else if (running && !queue.empty() && queue[0].done && !fault && (!queue[0].branch || queue[0].resolved)) {
+        if (serial_ready) rv=1;
+        else if (active && !hold && !queue.empty() && queue[0].done && !fault && (!queue[0].branch || queue[0].resolved)) {
             rv=1;
             if (queue.size()>1 && !queue[0].system && !queue[1].system && queue[1].done
                 && !get(queue[1].event,TRAP_OFFSET,1) && (!queue[1].branch || queue[1].resolved)) rv=3;
@@ -119,8 +136,7 @@ struct Bench {
         if (wb) live_ready|=uint64_t(1)<<saved.tag;
         for (unsigned n=0;n<2;n++) if (in.complete[n]>=0) {
             const auto& e=queue.at(unsigned(in.complete[n])); completed[n]=event(e,in.data[n],in.raw_fault);
-            if (active && !serial && !illegal && !trap_accept && !e.done
-                && (!recovery || in.complete[n]==0)) {
+            if (active && !illegal && !fault && !e.done && (!hold || in.complete[n]==0)) {
                 ca|=1u<<n;
                 if (e.rd && !in.raw_fault) { wb|=1u<<n; live_ready|=uint64_t(1)<<e.tag; }
             }
@@ -132,7 +148,7 @@ struct Bench {
             e.id=uses[(tail+n)%32]*32+(tail+n)%32;
             if (e.rd) { for (unsigned p=1;p<64;p++) if ((avail>>p)&1) {e.tag=p;break;} require(e.tag!=0,"stimulus free tag"); avail&=~(uint64_t(1)<<e.tag);rat[e.rd]=e.tag; }
         }
-        const unsigned alloc=running && !serial && !trap_accept ? (1u<<in.count)-1:0;
+        const unsigned alloc=active && !hold && !serial && !fault ? (1u<<in.count)-1:0;
         d.clk_i=0; d.rst_i=in.reset;d.flush_i=in.flush;d.drained_i=in.drain;d.resources_ready_i=1;
         d.valid_i=(1u<<in.count)-1;d.solo_i=in.system;d.cfi_i=in.branch;d.rs1_i=in.rs[0]|in.rs[1]<<5;d.rs2_i=0;d.rd_i=in.rd[0]|in.rd[1]<<5;
         d.pc_i=uint64_t(0x800+4*sequence)|(uint64_t(0x804+4*sequence)<<32);
@@ -176,7 +192,7 @@ struct Bench {
         // The serial payload is continuously exposed; the offer qualifies its contents.
         if (serial) compare(d.serial_event_o,0,serial_event,"serial event");
         compare(d.illegal_event_o,0,illegal_event,"illegal event");compare(d.trap_event_o,0,trap_event,"trap event");
-        for (unsigned n=0;n<2;n++) if ((rv>>n)&1) {auto e=serial?serial_event:queue[n].event;put(e,ORDER_OFFSET,64,order+n);compare(d.retire_event_o,n,e,"retire event");}
+        for (unsigned n=0;n<2;n++) if ((rv>>n)&1) {auto e=serial_ready?serial_event:queue[n].event;put(e,ORDER_OFFSET,64,order+n);compare(d.retire_event_o,n,e,"retire event");}
         for (unsigned port=0;port<4;port++) {
             unsigned p=port?audit:source; uint32_t value=payload[p];bool defined=known[p];
             if (serial_accept && saved.rd && p==saved.tag) {value=held.value;defined=true;coverage["serial_bypass"]++;}
@@ -202,6 +218,7 @@ struct Bench {
         coverage["wfi"]+=serial_accept&&saved.insn==0x10500073;
         coverage["stale_descriptor"]+=offered&&in.stale;coverage["nonhead_descriptor"]+=offered&&!queue.empty()&&offered_id!=queue.front().id;
         coverage["cancel_pending"]+=pending&&(in.flush||in.reset||recovery);
+        recover_pending=resolve && in.mispredict;
         if (in.reset) {
             for (unsigned a=0;a<32;a++) committed[a]=a;
             queue.clear();uses.fill(0);tail=sequence=0;order=0;pending=false;
@@ -211,9 +228,9 @@ struct Bench {
             if (illegal_accept) {queue.front().done=true;queue.front().event=illegal_event;}
             order+=__builtin_popcount(retired)+unsigned(trap_accept);
             if (in.flush || trap_accept) {queue.clear();tail=0;}
-            else if (recovery) {queue.front().resolved=true;tail=(queue.front().id%32+1)%32;queue.erase(queue.begin()+1,queue.end());}
+            else if (recovery) {tail=(queue.front().id%32+1)%32;queue.erase(queue.begin()+1,queue.end());}
             else {
-                if (in.resolve) queue.front().resolved=true;
+                if (resolve) queue.front().resolved=true;
                 for (unsigned n=0;n<2;n++) if ((retired>>n)&1) {auto e=queue.front();if(e.rd)committed[e.rd]=e.tag;queue.pop_front();}
                 for (unsigned n=0;n<in.count;n++) if ((alloc>>n)&1) {queue.push_back(allocated[n]);uses[tail]++;tail=(tail+1)%32;sequence++;}
             }
@@ -223,8 +240,11 @@ struct Bench {
         }
         d.clk_i=1;d.eval();d.clk_i=0;d.eval();
     }
+
     void drain() { for(unsigned n=0;!queue.empty();n++) {require(n<150,"progress watchdog");Input i;for(unsigned j=0,l=0;j<queue.size()&&l<2;j++) if(!queue[j].done&&!queue[j].system) {i.complete[l]=int(j);i.data[l++]=0x12340000+j;}tick(i);}tick(); }
+
     void write_reg(unsigned rd,uint32_t value) { Input i;i.count=1;i.rd[0]=rd;i.insn[0]=0x13;tick(i);i={};i.complete[0]=0;i.data[0]=value;tick(i);tick();tick(); }
+
     void command(uint32_t insn,unsigned stalls=2,unsigned cancel=0) {
         require(queue.empty(),"command starts empty");
         if (*std::max_element(uses.begin(),uses.end())>=200) {Input quiescent;quiescent.drain=true;tick(quiescent);}
@@ -234,8 +254,10 @@ struct Bench {
         for(unsigned n=0;n<stalls;n++) {i={};i.retire=n%2?2:0;i.illegal_ready=false;i.trap_ready=false;i.noise=true;tick(i);}
         if(cancel) {i={};i.flush=cancel==1;i.reset=cancel==2;tick(i);tick();} else drain();
     }
+
     void audit() {for(const auto& c:CSR_SPEC) command(csr(c.address),1);}
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

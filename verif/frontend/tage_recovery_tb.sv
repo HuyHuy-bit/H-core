@@ -14,7 +14,7 @@ module tage_recovery_tb;
   wire [1:0] taken;
   wire [63:0] target;
   branch_predictor #(.TAGE(1)) dut (
-    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .take_i(take),
+    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .target_i(64'd0), .take_i(take),
     .redirect_i(redirect), .repair_i(repair), .repair_checkpoint_i(saved), .retire_i(retire),
     .retire_pc_i(retire_pc), .retire_instruction_i(retire_instruction), .retire_next_i(retire_next),
     .taken_o(taken), .target_o(target), .checkpoint_o(checkpoint)
@@ -22,9 +22,11 @@ module tage_recovery_tb;
   task automatic tick();
     @(posedge clk); #1;
   endtask
+
   task automatic history(input logic [31:0] expected);
     if (dut.ghr_q !== expected) $fatal(1, "HISTORY got=%h expected=%h", dut.ghr_q, expected);
   endtask
+
   initial begin
     automatic logic [31:0] h, committed;
     automatic logic [35:0] branch_checkpoint, call_checkpoint;

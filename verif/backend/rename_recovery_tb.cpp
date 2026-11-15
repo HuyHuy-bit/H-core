@@ -14,9 +14,13 @@
 #include <vector>
 
 using Map = std::array<unsigned, 32>;
+
 struct Entry { uint64_t sequence; unsigned rd, tag, stale; bool done; };
+
 struct Branch { unsigned slot; uint64_t boundary; };
+
 struct WB { unsigned tag = 0; bool offer = false, live = false; };
+
 struct Input {
     std::array<unsigned, 2> rs1{}, rs2{}, rd{};
     std::array<WB, 2> wb{};
@@ -24,11 +28,13 @@ struct Input {
     bool resources = true, reset = false, flush = false;
     bool resolve = false, resolve_live = true, mispredict = false;
 };
+
 struct Output {
     unsigned accept = 0, source1 = 0, source2 = 0, destination = 0, stale = 0, ready = 0;
     unsigned wb = 0, commit = 0, checkpoint_id = 0;
     uint64_t allocation = 0;
 };
+
 class Check {
     Vrename_recovery dut;
     Map committed{};
@@ -38,15 +44,19 @@ public:
     std::vector<Branch> branches;
     std::map<std::string, unsigned> coverage;
     unsigned cycles = 0;
+    int recovering = -1;  // checkpoint of a mispredict accepted last cycle: this cycle restores it
     Check() { std::iota(committed.begin(), committed.end(), 0); }
+
     void require(bool ok, const std::string& message) const {
         if (!ok) throw std::runtime_error("rename recovery mismatch cycle="+std::to_string(cycles)+" "+message);
     }
+
     Map speculative() const {
         auto map = committed;
         for (const auto& e : pending) if (e.rd) map[e.rd] = e.tag;
         return map;
     }
+
     std::set<unsigned> available() const {
         std::set<unsigned> tags;
         for (unsigned tag = 1; tag < 64; ++tag) tags.insert(tag);
@@ -54,18 +64,22 @@ public:
         for (const auto& e : pending) if (e.rd) tags.erase(e.tag);
         return tags;
     }
+
     uint64_t readiness() const {
         uint64_t mask = 0;
         for (auto tag : committed) mask |= UINT64_C(1) << tag;
         for (const auto& e : pending) if (e.rd && e.done) mask |= UINT64_C(1) << e.tag;
         return mask;
     }
+
     unsigned valid() const {
         unsigned mask = 0;
         for (const auto& b : branches) mask |= 1U << b.slot;
         return mask;
     }
+
     WB result(unsigned index) const { return {pending.at(index).tag, true, true}; }
+
     unsigned committable(const Input& in) const {
         unsigned count = 0;
         for (const auto& e : pending) {
@@ -77,6 +91,7 @@ public:
         }
         return count;
     }
+
     template<class Packed> static unsigned tag(const Packed& packed, unsigned arch) {
         unsigned value = 0;
         for (unsigned bit = 0; bit < 6; ++bit) {
@@ -85,38 +100,51 @@ public:
         }
         return value;
     }
-    // Rebuild ownership from committed state and surviving instructions, rather than RTL masks.
-    Output run(const Input& in) {
+
+    bool younger(unsigned tag, uint64_t boundary) const {
+        for (const auto& e : pending) if (e.rd && e.tag == tag) return e.sequence > boundary;
+        return false;
+    }
+    // rebuild ownership from committed state and survivors; accepted mispredicts restore on the following cycle.
+    Output run(Input in) {
         ++cycles;
         auto pool = available(); auto map = speculative(); auto ready = readiness();
+        auto planner_ready = ready;  // the planner sees the registered table, without this cycle's writes
         const unsigned before = valid();
+        const bool recovery = recovering >= 0 && !in.reset && !in.flush;
+        if (recovery) { in.resolve = false; in.slot = unsigned(recovering); }
+        if (in.flush) in.resolve = false;
         auto branch = std::find_if(branches.begin(), branches.end(), [&](const Branch& b) { return b.slot == in.slot; });
         const unsigned branch_index = unsigned(branch-branches.begin());
         const bool resolve = !in.reset && !in.flush && in.resolve && in.resolve_live && branch != branches.end();
-        const bool recovery = resolve && in.mispredict;
-        uint64_t reclaim = 0, boundary = recovery ? branch->boundary : 0;
+        const bool kill = recovery || (resolve && in.mispredict);
+        uint64_t reclaim = 0, boundary = kill ? branch->boundary : 0;
+        // ROB hold/flush cycles block rename and commit; recovery exposes only surviving writebacks.
+        const bool held = recovery || (in.resolve && in.mispredict);
+        bool killed_offer = false;
+        if (in.reset || in.flush || held) in.commits = 0;
+        if (in.flush || held) in.resources = false;
+        for (auto& wb : in.wb) {
+            if (kill && wb.offer && wb.live && younger(wb.tag, boundary)) { wb.live = false; killed_offer = true; }
+            if (in.flush) wb.live = false;
+        }
         unsigned released = 0;
-        if (resolve) {
-            released = 1U << in.slot;
-            if (recovery) {
-                for (const auto& e : pending) if (e.rd && e.sequence > boundary) reclaim |= UINT64_C(1) << e.tag;
-                for (unsigned n = branch_index; n < branches.size(); ++n) released |= 1U << branches[n].slot;
-            }
+        if (resolve && !in.mispredict) released = 1U << in.slot;
+        if (recovery) {
+            for (const auto& e : pending) if (e.rd && e.sequence > boundary) reclaim |= UINT64_C(1) << e.tag;
+            for (unsigned n = branch_index; n < branches.size(); ++n) released |= 1U << branches[n].slot;
         }
         Output out;
         for (unsigned lane = 0; lane < 2; ++lane) {
             const auto& wb = in.wb[lane];
-            if (!in.reset && !in.flush && wb.offer && wb.live && wb.tag && !pool.count(wb.tag)
-                && !((ready >> wb.tag) & 1) && !((reclaim >> wb.tag) & 1)) {
+            if (!in.reset && wb.offer && wb.live && wb.tag && !pool.count(wb.tag) && !((ready >> wb.tag) & 1)) {
                 out.wb |= 1U << lane;
                 ready |= UINT64_C(1) << wb.tag;
             }
         }
         require(in.commits <= 2 && in.commits <= pending.size(), "bad test commit count");
-        if (!in.reset && !in.flush && !recovery) {
-            require(in.commits <= committable(in), "test retired unready or unresolved CFI");
-            out.commit = (1U << in.commits)-1;
-        }
+        if (!in.reset && !in.flush) require(in.commits <= committable(in), "test retired unready or unresolved CFI");
+        out.commit = (1U << in.commits)-1;
         const unsigned count = in.valid == 0 ? 0 : in.valid == 1 || (in.checkpoint & 1) ? 1 : 2;
         const bool need_checkpoint = count && in.valid != 2 && (in.checkpoint & ((1U << count)-1));
         unsigned needed = 0;
@@ -128,13 +156,14 @@ public:
                 out.accept |= 1U << lane;
                 const auto a = map[in.rs1[lane]], b = map[in.rs2[lane]];
                 out.source1 |= a << (6*lane); out.source2 |= b << (6*lane);
-                out.ready |= unsigned((ready >> a) & 1) << (2*lane);
-                out.ready |= unsigned((ready >> b) & 1) << (2*lane+1);
+                out.ready |= unsigned((planner_ready >> a) & 1) << (2*lane);
+                out.ready |= unsigned((planner_ready >> b) & 1) << (2*lane+1);
                 Entry e{++sequence, in.rd[lane], 0, 0, true};
                 if (e.rd) {
                     e.tag = *pool.begin(); pool.erase(pool.begin());
                     e.stale = map[e.rd]; e.done = false; map[e.rd] = e.tag;
                     ready &= ~(UINT64_C(1) << e.tag);
+                    planner_ready &= ~(UINT64_C(1) << e.tag);
                     out.destination |= e.tag << (6*lane); out.stale |= e.stale << (6*lane);
                     out.allocation |= UINT64_C(1) << e.tag;
                 }
@@ -148,7 +177,7 @@ public:
         dut.rs1_i = in.rs1[0] | in.rs1[1] << 5; dut.rs2_i = in.rs2[0] | in.rs2[1] << 5;
         dut.rd_i = in.rd[0] | in.rd[1] << 5;
         dut.resolve_i = in.resolve; dut.resolve_live_i = in.resolve_live; dut.mispredict_i = in.mispredict;
-        dut.resolve_id_i = in.slot; dut.wb_offer_i = 0; dut.wb_live_i = 0; dut.wb_destination_i = 0;
+        dut.branch_recover_i = recovery; dut.resolve_id_i = in.slot; dut.wb_offer_i = 0; dut.wb_live_i = 0; dut.wb_destination_i = 0;
         for (unsigned lane = 0; lane < 2; ++lane) {
             dut.wb_offer_i |= unsigned(in.wb[lane].offer) << lane;
             dut.wb_live_i |= unsigned(in.wb[lane].live) << lane;
@@ -166,12 +195,17 @@ public:
                 && dut.allocation_o == out.allocation, "rename packet");
         require(dut.wb_accept_o == out.wb && dut.commit_accept_o == out.commit, "final event acceptance");
         require(dut.resolve_accept_o == resolve && dut.branch_recover_o == recovery && dut.reclaim_o == reclaim
-                && dut.checkpoint_released_o == released && dut.checkpoint_valid_o == before, "recovery packet");
+                && dut.checkpoint_released_o == released && dut.checkpoint_valid_o == before,
+                "recovery packet resolve=" + std::to_string(dut.resolve_accept_o) + "/" + std::to_string(resolve)
+                + " recover=" + std::to_string(dut.branch_recover_o) + "/" + std::to_string(recovery)
+                + " released=" + std::to_string(dut.checkpoint_released_o) + "/" + std::to_string(released)
+                + " valid=" + std::to_string(dut.checkpoint_valid_o) + "/" + std::to_string(before)
+                + " slot=" + std::to_string(in.slot));
         require(dut.checkpoint_accept_o == create && dut.checkpoint_id_o == out.checkpoint_id, "atomic checkpoint creation");
         coverage["resource_stall"] += in.valid && !in.resources && !in.reset && !in.flush && !recovery;
         coverage["physical_stall"] += in.valid && in.resources && needed > available().size() && !in.reset && !in.flush && !recovery;
         coverage["deferred_tag_reuse"] += in.commits && need_checkpoint && needed > available().size() && !in.reset && !in.flush && !recovery;
-        coverage["flush_collision"] += in.flush && !in.reset && in.wb[0].offer && in.valid && in.commits;
+        coverage["flush_collision"] += in.flush && !in.reset && in.wb[0].offer && in.valid;
         coverage["created"] += create;
         coverage["lane1_cfi"] += create && out.accept == 3;
         coverage["cut"] += create && in.valid == 3 && out.accept == 1;
@@ -181,9 +215,9 @@ public:
         coverage["recovery"] += recovery;
         coverage["nested"] += recovery && branch_index > 0;
         coverage["younger_kill"] += recovery && branch_index+1 < branches.size();
-        coverage["commit_suppressed"] += recovery && in.commits;
-        coverage["retained_wb"] += recovery && out.wb;
-        coverage["resolve_create"] += resolve && !recovery && create;
+        coverage["mispredict_accept"] += resolve && in.mispredict;
+        coverage["retained_wb"] += kill && out.wb;
+        coverage["resolve_create"] += resolve && !in.mispredict && create;
         coverage["live_reset"] += in.reset && !pending.empty();
         coverage["full_flush"] += in.flush && !in.reset && !pending.empty();
         coverage["reject_resolve"] += in.resolve && !in.resolve_live && !in.reset && !in.flush;
@@ -193,10 +227,11 @@ public:
             coverage["reject_zero"] += wb.offer && wb.live && !wb.tag && !in.reset && !in.flush;
             coverage["reject_free"] += wb.offer && wb.live && available().count(wb.tag) && !in.reset && !in.flush;
             coverage["reject_ready"] += wb.offer && wb.live && wb.tag && ((readiness() >> wb.tag) & 1) && !in.reset && !in.flush;
-            coverage["killed_wb"] += recovery && wb.offer && wb.live && ((reclaim >> wb.tag) & 1);
+            coverage["killed_wb"] += killed_offer && wb.offer && !wb.live;
             coverage["reject_stale"] += wb.offer && !wb.live && wb.tag && !available().count(wb.tag)
                                          && !((readiness() >> wb.tag) & 1);
         }
+        recovering = -1;
         if (in.reset || in.flush) {
             pending.clear(); branches.clear();
             if (in.reset) std::iota(committed.begin(), committed.end(), 0);
@@ -208,7 +243,8 @@ public:
                 while (!pending.empty() && pending.back().sequence > boundary) pending.pop_back();
                 branches.erase(branches.begin()+branch_index, branches.end());
             } else {
-                if (resolve) branches.erase(branch);
+                if (resolve && in.mispredict) recovering = int(in.slot);
+                else if (resolve) branches.erase(branch);
                 for (unsigned n = 0; n < in.commits; ++n) {
                     const auto e = pending.front(); pending.pop_front();
                     if (e.rd) { require(committed[e.rd] == e.stale, "test stale chain"); committed[e.rd] = e.tag; }
@@ -226,7 +262,9 @@ public:
             require(tag(dut.rat_o, arch) == map[arch] && tag(dut.committed_o, arch) == committed[arch], "post-edge maps");
         dut.clk_i = 0; dut.eval(); return out;
     }
+
     void reset() { Input in; in.reset = true; run(in); }
+
     void negative(const std::string& name) {
         reset(); Input i; i.valid = 1; i.rd = {5, 0}; run(i);
         dut.valid_i = 0; dut.clk_i = 0;
@@ -238,6 +276,7 @@ public:
         dut.eval(); dut.clk_i = 1; dut.eval(); throw std::runtime_error("negative case escaped assertions");
     }
 };
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     try {
@@ -255,7 +294,8 @@ int main(int argc, char** argv) {
         write.rd = {8, 0}; c.run(write);
         Input recover; recover.resolve = true; recover.mispredict = true; recover.slot = 1;
         recover.valid = 3; recover.rd = {9, 10}; recover.commits = 1;
-        recover.wb[0] = c.result(3); recover.wb[1] = c.result(4); c.run(recover);
+        Input survivors; survivors.wb[0] = c.result(3); survivors.wb[1] = c.result(4);
+        c.run(recover); c.run(survivors);  // older results finish in the registered recovery cycle
         write.rd = {8, 0}; c.run(write);
         Input stale; stale.wb[0] = {c.pending.back().tag, true, false}; c.run(stale);
         stale.resolve = true; stale.resolve_live = false; stale.mispredict = true; stale.slot = 0; c.run(stale);
@@ -269,7 +309,7 @@ int main(int argc, char** argv) {
         c.run(zero); read.rs1 = {}; read.rs2 = {}; c.run(read);
         zero.resolve = true; zero.slot = 3; c.run(zero);
         zero.resolve = false; c.run(zero);
-        Input kill; kill.resolve = true; kill.mispredict = true; kill.slot = 5; c.run(kill);
+        Input kill; kill.resolve = true; kill.mispredict = true; kill.slot = 5; c.run(kill); c.run(Input{});  // the registered recovery cycle
         Input flush; flush.flush = true; flush.valid = 3; flush.checkpoint = 3; c.run(flush);
         write.rd = {2, 0}; c.run(write); wb = {}; wb.wb[0] = c.result(0); wb.commits = 1;
         wb.valid = 1; wb.rd = {2, 0}; c.run(wb);
@@ -306,7 +346,7 @@ int main(int argc, char** argv) {
         }
         c.run(flush);
         for (const auto* name : {"resource_stall", "physical_stall", "deferred_tag_reuse", "flush_collision", "reject_zero", "reject_free", "reject_ready", "created", "lane1_cfi", "cut", "waw", "full_stall", "full_non_cfi", "recovery", "nested",
-                                "younger_kill", "commit_suppressed", "retained_wb", "killed_wb", "resolve_create", "live_reset",
+                                "younger_kill", "mispredict_accept", "retained_wb", "killed_wb", "resolve_create", "live_reset",
                                 "full_flush", "reject_resolve", "reject_stale", "commit_rename"})
             c.require(c.coverage[name] > 0, std::string("missing coverage ")+name);
         std::cout << "RENAME RECOVERY PASS seed=" << seed << " cycles=" << c.cycles;

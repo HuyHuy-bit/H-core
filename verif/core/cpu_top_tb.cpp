@@ -20,8 +20,8 @@ int main(int argc,char** argv) {
         b.require(b.coverage["branch_redirect"]==redirects,"not-taken prediction caused redirect");
         // Wrong-path instruction access failure must be discarded when the older branch resolves.
         b.memory.fill(instruction(2,0,0,0,0)); b.memory[0x800/4]=0;
-        // A conditional branch starts weakly not-taken after reset, so its first execution still fetches the wrong path.
-        b.memory[0]=instruction(21,0,0,0,0x800); b.error_address=32; b.reset();
+        // the first weakly predicted branch ends line zero; place its wrong-path fault in the immediately following line.
+        b.memory[7]=instruction(21,0,0,0,0x800-28); b.error_address=32; b.reset();
         for (unsigned n=0;n<60;++n) { Input i; i.grant=false; b.tick(i); }
         b.require(b.d.fetch_fault_o,"wrong-path fetch fault reached frontend");
         b.run_to(0x800,rng); b.coverage["wrong_path_fault_recovered"]++; b.error_address=UINT32_MAX;

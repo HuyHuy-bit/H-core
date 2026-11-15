@@ -27,6 +27,7 @@ def validate_trace(packets: list[dict]) -> tuple[schema.CommitEvent, ...]:
     return tuple(events)
 
 
+# compare architectural effects with schema-defined masks and ordering
 def compare_traces(expected_packets: list[dict], actual_packets: list[dict]) -> None:
     expected = validate_trace(expected_packets)
     actual = validate_trace(actual_packets)

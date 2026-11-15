@@ -37,8 +37,8 @@
     {
       "name": "age_priority",
       "source": "rtl/memory/store_forward.sv",
-      "old": "store_age_i[s] >= youngest",
-      "new": "store_age_i[s] <= youngest",
+      "old": "store_age_i[s] >= store_age_i[t]",
+      "new": "store_age_i[s] <= store_age_i[t]",
       "assertions": [
         "data_exact",
         "result_exact",

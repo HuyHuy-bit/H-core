@@ -1,15 +1,8 @@
 `default_nettype none
-// L1 data cache: 2 ways of 32-byte lines over l1_cache_array, write-back and write-allocate.
-// An access (a load, or the store buffer's held write) reads its set when it enters and decides HIT_STAGES = 1
-// cycle later from the registered read. One miss is outstanding: dirty victim writeback, refill into line_q,
-// install from line_q. An access that cannot finish parks in one replay slot and reads again once the miss
-// handler is free; after an install the miss target reads again first, then the slot.
-// Every ready, memory request and array write comes from registers; only the load hit response is combinational.
+// two-way write-back/write-allocate L1 cache with 32-byte lines, one-cycle hits and one miss/replay slot.
 module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
-  // inputs
   input  wire clk_i, rst_i,
-  input  wire kill_i,                      // drops the loads in the stage, the slot and the miss target, and a load
-                                           // accepted in this cycle; never a write, writeback or refill
+  input  wire kill_i,                      // cancel loads, including new arrivals; stores and fills continue.
   input  wire load_valid_i,
   input  wire [12:0] load_id_i,
   input  wire [31:0] load_address_i,
@@ -23,7 +16,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
   input  wire mem_request_ready_i,
   input  wire mem_response_valid_i,
   input  memory_protocol_pkg::mem_response_t mem_response_i,
-  // outputs
+
   output wire load_ready_o,
   output wire response_valid_o,
   output wire [12:0] response_id_o,
@@ -31,20 +24,22 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
   output wire write_done_o,                // the held write lands at this edge; the store buffer pops it
   output wire clean_done_o,
   output wire busy_o,
-  output wire fatal_o,                     // refill or writeback access fault, or protocol error; sticky. Then
-                                           // every handshake output stays low and busy_o high
+  output wire fatal_o,                     // sticky bus/protocol fault: handshakes stop and busy stays high.
   output wire mem_request_valid_o,
   output memory_protocol_pkg::mem_request_t mem_request_o,
   output wire mem_response_ready_o
 );
+
   import memory_protocol_pkg::*;
+
   localparam int WAYS = 2, INDEX_BITS = $clog2(SETS), TAG_BITS = 27 - INDEX_BITS;
 
-  // shortcut: compare and select are built for HIT_STAGES = 1; a second stage would need its own race guards
+  // configuration requires one-cycle hits because replay and race guards assume that latency.
   if (HIT_STAGES != 1) begin : g_hit_stages
     $error("l1_dcache implements HIT_STAGES = 1 only");
   end
 
+  // access, replay, write-landing and miss state
   typedef struct packed {
     logic write;
     logic [12:0] id;
@@ -70,7 +65,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
   wire [WAYS-1:0][TAG_BITS-1:0] read_tag;
   wire [WAYS-1:0][255:0] read_data;
 
-  // entry: at most one access per cycle, the held write ahead of a load (it is older), all from registers
+  // access admission prioritizes replay, the held slot and older stores before new loads.
   wire miss_busy = state_q != IDLE;
   wire base = !slot_full_q && !(miss_busy && stage_valid_q) && !replay_pending_q && !cleaning_q && !fatal_q;
   wire write_enter = write_valid_i && !write_busy_q && base;
@@ -91,7 +86,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
   wire clean_way = clean_index_q[0];
   wire [INDEX_BITS-1:0] read_set = walk_q ? clean_set : next_access.address[5 +: INDEX_BITS];
 
-  // decision, one cycle after entry, from the registered read and the current valid bits
+  // hit/miss decision uses the registered array read and current validity.
   wire [INDEX_BITS-1:0] stage_set = stage_q.address[5 +: INDEX_BITS];
   wire [INDEX_BITS-1:0] target_set = target_q.address[5 +: INDEX_BITS];
   wire [INDEX_BITS-1:0] write_set = write_address_i[5 +: INDEX_BITS];
@@ -125,7 +120,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
       default: response_data_o = shifted;
     endcase
 
-  // array write port: the landing write always lands; an install waits behind it, at most one cycle
+  // array write arbitration gives landing stores priority over refill installation.
   wire land_go = land_valid_q && !fatal_q;
   wire install_go = state_q == INSTALL && !land_valid_q && !fatal_q;
   assign write_done_o = land_go;
@@ -137,7 +132,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
     .write_data_i(land_valid_q ? {8{write_data_i}} : line_q),
     .read_tag_o(read_tag), .read_data_o(read_data));
 
-  // memory port: one transaction at a time, requested from state and never withdrawn
+  // memory port holds one transaction from registered state through request and response.
   wire waiting = state_q == WB_RESPONSE || state_q == FILL_RESPONSE;
   assign mem_request_valid_o = (state_q == WB_REQUEST || state_q == FILL_REQUEST) && !fatal_q;
   assign mem_response_ready_o = waiting && !fatal_q;
@@ -161,7 +156,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
     end
   end
 
-  // clean: once nothing is in flight, walk every (set, way) and write back the dirty lines
+  // cache cleaning waits for in-flight work, then walks all sets and ways for dirty writeback.
   wire clean_start = cleaning_q && !walk_q && !stage_valid_q && !slot_full_q && !replay_pending_q && !write_busy_q;
   wire walk_step = (state_q == CLEAN_SCAN && !dirty_q[clean_set][clean_way])
     || (state_q == WB_RESPONSE && walk_q && response_ok);
@@ -170,6 +165,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
     || cleaning_q;
   assign fatal_o = fatal_q;
 
+  // cache access, metadata and miss-handler updates
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       state_q <= IDLE;
@@ -253,7 +249,7 @@ module l1_dcache #(parameter int HIT_STAGES = 1, SETS = 16) (
     end
   end
 
-  // checks: design invariants are fatal; a bus error is an environment event and is only named
+  // protocol and state assertions; bus faults produce diagnostics.
 `ifndef SYNTHESIS
   logic held_q, replayed_q;
   logic [67:0] held_fields_q;

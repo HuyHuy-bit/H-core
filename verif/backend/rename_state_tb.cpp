@@ -15,12 +15,14 @@
 #include <vector>
 
 struct Entry { unsigned rd, destination, stale; bool done; };
+
 struct Input {
     std::array<unsigned, 2> rs1{}, rs2{}, rd{};
     unsigned valid = 0, checkpoint = 0, commits = 0;
     std::vector<unsigned> wb;
     bool resources = true, reset = false, recover = false, wb_lane1 = false, wb_zero = false;
 };
+
 struct Output {
     unsigned accept = 0, source1 = 0, source2 = 0, destination = 0, stale = 0, ready = 0;
     uint64_t allocations = 0;
@@ -36,6 +38,7 @@ public:
     unsigned cycles = 0;
     std::map<std::string, unsigned> coverage;
     Check() { std::iota(committed.begin(), committed.end(), 0); }
+
     std::array<unsigned, 32> speculative() const {
         auto map = committed;
         for (const auto& entry : pending) if (entry.rd) map[entry.rd] = entry.destination;
@@ -49,6 +52,7 @@ public:
         for (const auto& entry : pending) if (entry.rd) pool.erase(entry.destination);
         return pool;
     }
+
     uint64_t readiness() const {
         uint64_t bits = 0;
         for (auto p : committed) bits |= UINT64_C(1) << p;
@@ -56,9 +60,11 @@ public:
             if (entry.rd && entry.done) bits |= UINT64_C(1) << entry.destination;
         return bits;
     }
+
     void require(bool condition, const std::string& detail) const {
         if (!condition) throw std::runtime_error("rename state mismatch cycle=" + std::to_string(cycles) + " " + detail);
     }
+
     template <class Packed> static unsigned tag(const Packed& map, unsigned arch) {
         unsigned value = 0;
         for (unsigned bit = 0; bit < 6; ++bit) {
@@ -67,11 +73,13 @@ public:
         }
         return value;
     }
+
     Output run(const Input& in) {
         ++cycles;
         auto pool = available();
         auto map = speculative();
         auto ready = readiness();
+        auto planner_ready = ready;  // the planner sees the registered table, without this cycle's writes
         for (auto index : in.wb) {
             require(index < pending.size() && pending[index].rd && !pending[index].done, "bad test WB");
             ready |= UINT64_C(1) << pending[index].destination;
@@ -81,7 +89,7 @@ public:
         for (unsigned word = 0; word < 6; ++word) dut.branch_rat_i[word] = 0;
         dut.clk_i = 0; dut.rst_i = in.reset; dut.recover_i = in.recover;
         dut.valid_i = in.valid; dut.checkpoint_i = in.checkpoint;
-        dut.resources_ready_i = in.resources;
+        dut.resources_ready_i = in.resources && !in.recover;  // the caller lowers resources in a recovery cycle
         dut.rs1_i = in.rs1[0] | in.rs1[1] << 5;
         dut.rs2_i = in.rs2[0] | in.rs2[1] << 5;
         dut.rd_i = in.rd[0] | in.rd[1] << 5;
@@ -110,14 +118,15 @@ public:
                 const auto a = map[in.rs1[lane]], b = map[in.rs2[lane]];
                 out.accept |= 1U << lane;
                 out.source1 |= a << (6*lane); out.source2 |= b << (6*lane);
-                out.ready |= unsigned((ready >> a) & 1) << (2*lane);
-                out.ready |= unsigned((ready >> b) & 1) << (2*lane+1);
+                out.ready |= unsigned((planner_ready >> a) & 1) << (2*lane);
+                out.ready |= unsigned((planner_ready >> b) & 1) << (2*lane+1);
                 Entry entry{in.rd[lane], 0, 0, true};
                 if (entry.rd) {
                     entry.destination = *pool.begin(); pool.erase(pool.begin());
                     entry.stale = map[entry.rd]; entry.done = false;
                     map[entry.rd] = entry.destination;
                     ready &= ~(UINT64_C(1) << entry.destination);
+                    planner_ready &= ~(UINT64_C(1) << entry.destination);
                     out.destination |= entry.destination << (6*lane);
                     out.stale |= entry.stale << (6*lane);
                     out.allocations |= UINT64_C(1) << entry.destination;
@@ -183,7 +192,9 @@ public:
         dut.clk_i = 0; dut.eval();
         return out;
     }
+
     void reset() { Input in; in.reset = true; run(in); }
+
     void negative(const std::string& mode) {
         reset(); Input in; in.valid = 3; in.rd = {5, 5}; run(in);
         dut.clk_i = 0; dut.valid_i = 0;

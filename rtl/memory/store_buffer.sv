@@ -1,15 +1,12 @@
 `default_nettype none
-// store buffer: retired cacheable stores in retirement order. The oldest is held on l1_dcache's write port until it
-// lands; every entry stays visible to load forwarding until then, entry k being the k-th oldest (age k).
+// retired stores drain oldest first and remain forwarding candidates through their cache landing cycle.
 module store_buffer #(parameter int DEPTH = 4) (
-  // inputs
   input  wire clk_i, rst_i,
   input  wire push_i,
   input  wire [31:0] push_address_i, push_data_i,
   input  wire [3:0] push_mask_i,
   input  wire drain_done_i,                // l1_dcache write_done_o: the head landed, pop it
 
-  // outputs
   output wire push_ready_o, drain_valid_o,
   output wire [31:0] drain_address_o, drain_data_o,
   output wire [3:0] drain_mask_o,
@@ -18,7 +15,8 @@ module store_buffer #(parameter int DEPTH = 4) (
   output wire [DEPTH-1:0][31:0] entry_address_o, entry_data_o,
   output wire [DEPTH-1:0][3:0] entry_mask_o
 );
-  // a pop shifts every entry one place toward the head, so each output is a register with no pointer mux
+
+  // shift-register storage keeps age-ordered forwarding outputs free of pointer muxes.
   logic [DEPTH-1:0] valid_q;
   logic [DEPTH-1:0][31:0] address_q, data_q;
   logic [DEPTH-1:0][3:0] mask_q;
@@ -28,6 +26,7 @@ module store_buffer #(parameter int DEPTH = 4) (
   wire [DEPTH-1:0][31:0] data_up = {32'd0, data_q[DEPTH-1:1]};
   wire [DEPTH-1:0][3:0] mask_up = {4'd0, mask_q[DEPTH-1:1]};
 
+  // head drain and age-ordered forwarding views
   assign push_ready_o = !valid_q[DEPTH-1];
   assign drain_valid_o = valid_q[0];
   assign drain_address_o = address_q[0];
@@ -39,6 +38,7 @@ module store_buffer #(parameter int DEPTH = 4) (
   assign entry_data_o = data_q;
   assign entry_mask_o = mask_q;
 
+  // pop shifts survivors; push fills the first free entry after the pop.
   always_ff @(posedge clk_i) begin
     if (rst_i) valid_q <= '0;
     else valid_q <= shifted | (push_i ? occupied[DEPTH-1:0] & ~shifted : '0);
@@ -55,7 +55,7 @@ module store_buffer #(parameter int DEPTH = 4) (
       end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (!rst_i) begin
     assert (!push_i || push_ready_o) else $fatal(1, "SB_PUSH_FULL");

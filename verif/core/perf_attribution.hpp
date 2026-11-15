@@ -7,34 +7,42 @@
 #include <string>
 
 namespace perf_attribution {
+
 inline void check(bool ok, const char* message) {
     if (!ok) throw std::runtime_error(std::string("ATTRIBUTION ")+message);
 }
+
 inline unsigned age(unsigned id, unsigned head) { return (id-head)&31; }
+
 inline bool cfi(uint32_t instruction) {
     const unsigned op=instruction&127;
     return op==0x63 || op==0x6f || op==0x67;
 }
+
 struct Instruction {
     bool valid=false, predicted_taken=false;
     unsigned id=0;
     uint32_t pc=0, instruction=0, next_pc=0;
 };
+
 struct QueueEntry {
     bool valid=false;
     unsigned id=0, ready=0, awake=0, eligible=0;
     std::array<unsigned,2> source{};
 };
+
 struct Load {
     bool valid=false, ready=false, early=false, issued=false;
     unsigned id=0, size=0;
     uint32_t address=0;
 };
+
 struct Store {
     bool valid=false, ready=false;
     unsigned rank=0, mask=0, data_ready=0;
     uint32_t address=0;
 };
+
 struct Frame {
     uint64_t cycle=0;
     bool region=false, head_read=false, stop=false, flush=false, recover=false;
@@ -57,7 +65,9 @@ struct Frame {
     bool resolve_offer=false, resolve_grant=false, system_busy=false, fault_pending=false, memory_irrevocable=false;
 };
 enum class Dependence { clear, address, data, partial };
+
 struct Disambiguation { Dependence reason=Dependence::clear; unsigned forwarded=0, memory=0; };
+
 inline Disambiguation disambiguate(const Frame& f,const Load& l) {
     check(l.size<=2 && !(l.address&((1u<<l.size)-1)),"illegal early load");
     const unsigned mask=((1u<<(1u<<l.size))-1)<<(l.address&3), rank=age(l.id,f.head)+4;
@@ -123,15 +133,18 @@ class Observer {
         if (recycling) add(f.region,"recycle_window_cycles");
         if (recycling && !f.recycle_state && f.allocated[0].valid) recycling=false;
     }
+
     void add(bool region,const std::string& key,uint64_t value=1) {
         counts[0][key]+=value;
         if (region) counts[1][key]+=value;
     }
+
     Record& find(unsigned id) {
         auto it=records.find(slots[id&31]);
         check(it!=records.end() && !it->second.retired && it->second.ins.id==id,"identity mismatch");
         return it->second;
     }
+
     void gap(Record& r,uint64_t delay,uint64_t issues,uint64_t retires) {
         const bool region=r.retirement_region;
         add(region,"retired_miss_recovery_samples");
@@ -142,7 +155,9 @@ class Observer {
     struct Gap { uint64_t delay=0,issues=0,retires=0; };
     std::map<uint64_t,Gap> completed_gaps;
 public:
+
     const auto& totals() const { return counts; }
+
     void sample(const Frame& f) {
         add(f.region,"cycles");
         unsigned live=0;
@@ -355,6 +370,7 @@ public:
             add(f.region,"allocated");
         }
     }
+
     void print(std::ostream& out,bool region) const {
         auto result=counts;
         for (const auto& [sequence,r]:records) {

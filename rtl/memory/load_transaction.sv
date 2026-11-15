@@ -1,7 +1,6 @@
 `default_nettype none
 // one load on the data port: waits for issue permission, requests the line or word and returns the result.
 module load_transaction (
-  // inputs
   input  wire clk_i, rst_i, kill_i,
   input  wire launch_i,
   input  wire [12:0] id_i,
@@ -16,7 +15,6 @@ module load_transaction (
   input  memory_protocol_pkg::mem_response_t response_i,
   input  wire take_i,
 
-  // outputs
   output wire ready_o,
   output wire request_valid_o,
   output memory_protocol_pkg::mem_request_t request_o,
@@ -27,7 +25,9 @@ module load_transaction (
   output wire fault_o, busy_o, irrevocable_o,
   output logic fatal_o
 );
+
   import memory_protocol_pkg::*;
+
   typedef enum logic [2:0] {EMPTY, WAIT_ISSUE, REQUEST, RESPONSE, RESULT} state_e;
   state_e state_q;
   logic [12:0] owner_q;
@@ -134,7 +134,7 @@ module load_transaction (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin

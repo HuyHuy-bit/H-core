@@ -49,7 +49,7 @@
     "surviving_writeback",
     "branch_link_writeback",
     "killed_writeback",
-    "recovery_retire_collision",
+    "mispredict_accept",
     "correct_resolve_create",
     "retired_tag_reuse",
     "killed_tag_reuse",
@@ -89,9 +89,9 @@
       ]
     },
     {
-      "name": "accepted_killed_wb",
+      "name": "accepted_ready_wb",
       "source": "rtl/backend/rename_recovery.sv",
-      "old": "&& !reclaim_o[wb_destination_i[lane*6 +: 6]]",
+      "old": "&& !ready_o[wb_destination_i[lane*6 +: 6]]",
       "new": "&& 1'b1",
       "assertions": [
         "writeback_acceptance"

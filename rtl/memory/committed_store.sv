@@ -1,8 +1,6 @@
 `default_nettype none
-// cached-store engine: captures a retired store's bytes and writes them as one masked line request.
-// DCACHE=1: acceptance hands the bytes to the store buffer, so the engine never leaves EMPTY.
+// retired-store engine: masked line writes, or immediate store-buffer handoff with DCACHE.
 module committed_store #(parameter bit DCACHE = 0) (
-  // inputs
   input  wire clk_i, rst_i, recovery_i,
   input  wire desc_valid_i, store_i, uncached_i, fault_i,
   input  wire [12:0] id_i,
@@ -16,7 +14,6 @@ module committed_store #(parameter bit DCACHE = 0) (
   input  wire response_valid_i,
   input  memory_protocol_pkg::mem_response_t response_i,
 
-  // outputs
   output wire commit_ready_o,
   output wire accept_o,
   output wire request_valid_o,
@@ -29,7 +26,9 @@ module committed_store #(parameter bit DCACHE = 0) (
   output logic fatal_o,
   output logic [2:0] fatal_reason_o
 );
+
   import memory_protocol_pkg::*;
+
   typedef enum logic [1:0] {EMPTY, REQUEST, RESPONSE} state_e;
   state_e state_q;
   logic [12:0] owner_q;
@@ -76,8 +75,7 @@ module committed_store #(parameter bit DCACHE = 0) (
     end
   end
 
-  // committed-store transaction state
-  // only retirement acceptance captures bytes; recovery cannot cancel committed ownership.
+  // committed-store state; accepted retirement owns the bytes through recovery.
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       state_q <= EMPTY;
@@ -100,7 +98,7 @@ module committed_store #(parameter bit DCACHE = 0) (
     end
   end
 
-  // the cached build never leaves EMPTY, so the capture registers do not exist there; tying them off keeps them from synthesizing as undriven
+  // capture store payloads only without DCACHE; buffered builds tie off unused capture state.
   if (!DCACHE) begin : capture
     always_ff @(posedge clk_i) if (!rst_i && !fatal_o && error_reason == 0 && state_q == EMPTY && accept_o) begin
       owner_q <= id_i;
@@ -116,7 +114,7 @@ module committed_store #(parameter bit DCACHE = 0) (
     wire unused = ^address_i[31:2];
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (!rst_i) begin
     assert (!commit_i || commit_ready_o) else $fatal(1, "STORE_COMMIT_READY");

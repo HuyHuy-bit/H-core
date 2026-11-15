@@ -16,14 +16,18 @@ using packed_bits::get32;
 static uint32_t word(uint32_t address, unsigned serial) {
     return (address * 0x9e3779b9U) ^ (serial * 0x85ebca6bU) ^ 0x12345678U;
 }
+
 struct Input {
     bool reset=false, enable=true, redirect=false, request_ready=true, response=false;
     uint32_t target=0;
     unsigned take=0, status=0;
     int corrupt=0;
 };
+
 struct Request { uint32_t pc=0; unsigned id=0, serial=0; };
+
 struct Entry { uint32_t pc, instruction; bool fault; unsigned cause; };
+
 struct Bench {
     Vfetch_unit d;
     unsigned cycles=0, serial=0, expected_id=0;
@@ -32,10 +36,13 @@ struct Bench {
     Request request;
     std::deque<Entry> entries;
     std::map<std::string, unsigned> coverage;
+
     void require(bool good, const std::string& message) const {
         if (!good) throw std::runtime_error("fetch two wide mismatch cycle="+std::to_string(cycles)+": "+message);
     }
+
     unsigned available() const { return entries.empty() ? 0 : entries.front().fault || entries.size()==1 ? 1 : 3; }
+
     unsigned tick(Input i={}) {
         d.clk_i=0; d.rst_i=i.reset; d.enable_i=i.enable; d.redirect_i=i.redirect;
         d.redirect_pc_i=i.target; d.request_ready_i=i.request_ready; d.response_valid_i=i.response;
@@ -139,22 +146,28 @@ struct Bench {
         d.clk_i=1; d.eval(); ++cycles;
         return accepted;
     }
+
     void reset() { Input i; i.reset=true; tick(i); }
+
     void redirect(uint32_t target) { Input i; i.redirect=true; i.target=target; tick(i); }
+
     void await_request(bool ready=true) {
         for (unsigned n=0; !offered && !pending; ++n) {
             require(n<8, "request progress"); Input i; i.request_ready=ready; tick(i);
         }
     }
+
     void respond(unsigned status=0) {
         await_request();
         if (offered) tick();
         Input i; i.response=true; i.status=status; tick(i);
     }
+
     void consume_all() {
         while (!entries.empty()) { Input i; i.take=available(); tick(i); }
     }
 };
+
 static void directed(Bench& b) {
     b.reset();
     for (unsigned n=0; n<4; ++n) {
@@ -204,6 +217,7 @@ static void directed(Bench& b) {
     }
     b.reset();
 }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

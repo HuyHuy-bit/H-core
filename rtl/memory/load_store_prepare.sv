@@ -1,14 +1,12 @@
 `default_nettype none
 // address generation for one load/store: address, mask, data, fault and path class, held until taken.
 module load_store_prepare (
-  // inputs
   input  wire clk_i, rst_i, flush_i,
   input  wire launch_i,
   input  wire [12:0] id_i,
   input  wire [31:0] instruction_i, pc_i, source1_i, source2_i,
   input  wire take_i,
 
-  // outputs
   output wire ready_o,
   output wire valid_o,
   output wire [12:0] id_o,
@@ -18,8 +16,10 @@ module load_store_prepare (
   output wire [1:0] size_o,
   output wire store_o, load_unsigned_o, uncached_o, head_only_o, fault_o
 );
+
   import core_pkg::*;
   import platform_pkg::*;
+
   typedef struct packed {
     logic [12:0] id;
     logic [31:0] instruction, pc, source1, source2, address, write_data, cause, trap_value;
@@ -82,8 +82,7 @@ module load_store_prepare (
     end
   end
 
-  // prepared descriptor storage
-  // this descriptor authorizes no memory side effect; its consumer owns ordering and bus admission.
+  // descriptor storage; the consumer owns ordering and memory-side-effect admission.
   always_ff @(posedge clk_i) begin
     if (rst_i || flush_i) pending_q <= 0;
     else begin
@@ -95,7 +94,7 @@ module load_store_prepare (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (!rst_i && !flush_i) begin
     assert (!launch_i || ready_o) else $fatal(1, "LS_PREP_CAPACITY");

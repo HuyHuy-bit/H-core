@@ -1,7 +1,6 @@
 `default_nettype none
 // rob-head memory owner: prepares a load/store, runs it on memory_transaction_path and retires or traps it.
 module head_memory_controller #(parameter bit DCACHE = 0) (
-  // inputs
   input  wire clk_i, rst_i, recovery_i, cancel_i,
   input  wire memory_valid_i,
   input  wire [12:0] memory_id_i,
@@ -22,7 +21,6 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
   input  wire response_valid_i,
   input  memory_protocol_pkg::mem_response_t response_i,
 
-  // outputs
   output wire read_request_o, prepare_o, busy_o,
   output wire admission_valid_o,
   output wire [12:0] admission_id_o,
@@ -45,8 +43,10 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
   output memory_protocol_pkg::mem_request_t request_o,
   output wire response_ready_o
 );
+
   import core_pkg::*;
   import commit_event_pkg::*;
+
   logic owner_q, launched_q, fault_sent_q;
   wire prepared, prepare_ready, desc_take, path_busy, result_valid, result_fault, result_store;
   wire commit_ready, commit_accept;
@@ -69,6 +69,7 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
   wire result_take = accepted_trap || (accepted_serial && !cached_store);
   commit_event_t base_event;
 
+  // head preparation, store admission and result ownership
   assign read_request_o = active && !owner_q && !path_busy && !recovery_i && !cancel_i
     && !response_valid_i && memory_valid_i && head_valid_i
     && memory_id_i == head_id_i && pc_i == head_pc_i;
@@ -143,8 +144,7 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
     end
   end
 
-  // address generation and access checks
-  // retain the instruction and operands through retirement or trap entry.
+  // address preparation retains the instruction and operands through retirement or trap entry.
   load_store_prepare preparation (
     .clk_i, .rst_i, .flush_i(cancel), .launch_i(prepare_o), .ready_o(prepare_ready),
     .id_i(memory_id_i), .instruction_i, .pc_i, .source1_i, .source2_i,
@@ -174,7 +174,7 @@ module head_memory_controller #(parameter bit DCACHE = 0) (
     .request_valid_o, .request_ready_i, .request_o, .response_valid_i, .response_ready_o, .response_i
   );
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   logic released_q;
   logic [12:0] released_id_q;

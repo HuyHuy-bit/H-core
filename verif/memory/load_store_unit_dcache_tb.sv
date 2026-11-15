@@ -3,6 +3,7 @@
 module load_store_unit_dcache_tb;
   import memory_protocol_pkg::*;
   import commit_event_pkg::*;
+
   logic clk = 0, rst = 1;
   always #5 clk = ~clk;
   logic flush = 0, recover = 0, hold = 0, issue = 0, allocate = 0;
@@ -17,7 +18,7 @@ module load_store_unit_dcache_tb;
   localparam logic [31:0] LW0 = 32'h00012283, LW4 = 32'h00412283;  // lw x5, 0(x2) / lw x5, 4(x2)
   assign unused_request = '0;
 
-  // memory: one transaction at a time; line word w of line L reads as L + 4w; hold delays the response
+  // memory holds one transaction; word w reads as line address + 4w and hold delays its response.
   logic pending = 0;
   logic [3:0] pending_id;
   logic [31:0] pending_address;
@@ -40,7 +41,7 @@ module load_store_unit_dcache_tb;
     end
   end
 
-  // completions are taken at once and recorded
+  // record each immediately accepted load completion.
   int completions = 0;
   logic [12:0] last_id;
   logic [31:0] last_value;
@@ -53,11 +54,11 @@ module load_store_unit_dcache_tb;
 
   load_store_unit #(.DCACHE(1)) dut (
     .clk_i(clk), .rst_i(rst), .flush_i(flush), .recover_i(recover), .recover_slot_i(recover_slot),
-    .head_valid_i(1'b1), .head_id_i(13'd0),
+    .head_valid_i(1'b1), .head_id_i(13'd0), .head_step_i(2'b00),
     .allocate_valid_i({1'b0, allocate}), .allocate_memory_i({1'b0, allocate}), .allocate_store_i(2'b00),
     .allocate_ready_o(unused_wire), .allocate_i({1'b0, allocate}), .allocate_id_i({13'd0, id}),
     .allocate_instruction_i(instruction), .allocate_pc_i(32'h40), .allocate_sources_i(12'd2),
-    .issue_i(issue), .issue_id_i(id), .issue_instruction_i(instruction), .issue_pc_i(32'h40),
+    .issue_i(issue), .issue_id_i(id), .issue_destination_i(6'd0), .complete_destination_o(), .issue_instruction_i(instruction), .issue_pc_i(32'h40),
     .source1_i(base), .source2_i(32'd0), .retire_i(1'b0), .clean_i(1'b0),
     .head_memory_o(), .head_instruction_o(), .head_sources_o(), .issue_allowed_i(1'b1),
     .committed_valid_i(1'b0), .committed_address_i(32'd0), .committed_data_i(32'd0), .committed_mask_i(4'd0),
@@ -94,10 +95,10 @@ module load_store_unit_dcache_tb;
     @(posedge clk); #1 recover = 0;
   endtask
 
-  // only once the load has reached the cache: a load waiting in the queue does not count as busy
+  // wait_idle is valid only after cache admission; a queued load alone does not assert busy.
   task automatic wait_idle(input string name);
     for (int n = 0; n < 60 && busy; n++) step();
-    // the unit stays busy while the cache is, so identity recycling waits for a squashed load's miss
+    // identity recycling must wait for a squashed miss to drain.
     if (busy || fatal || dut.cached.dcache.busy_o) $fatal(1, "%s busy=%b fatal=%b", name, busy, fatal);
   endtask
 

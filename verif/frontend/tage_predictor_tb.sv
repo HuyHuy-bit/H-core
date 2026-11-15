@@ -1,7 +1,5 @@
 `default_nettype none
-// replays +stimulus lines "lookup_valid lookup_pc update_valid update_pc taken expected region" (hex);
-// expected is the lookup from the state before that line's update, and is checked on every line.
-// random idle cycles with junk inputs check that invalid ports neither predict nor train.
+// check each seven-field hex lookup before its update; invalid-port noise must neither predict nor train.
 module tage_predictor_tb #(parameter int AGE_BITS = 18);
   logic clk;
   initial begin

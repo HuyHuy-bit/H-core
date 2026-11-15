@@ -1,25 +1,23 @@
 `default_nettype none
-// selectable tage/gshare direction, an eight-entry return stack and tagless jalr targets.
-// checkpoints hold post-instruction history and stack pointer; tables train at retirement.
-// recovery restores the stack pointer, not overwritten stack entries.
+// TAGE/gshare direction, eight-entry return stack and retired JALR targets.
 module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
                           parameter int HISTORY_BITS = TAGE ? 32 : 8,
                           parameter int CHECKPOINT_BITS = HISTORY_BITS + 4,
-                          parameter bit PARALLEL_TAGE = 0) (
-  // inputs
+                          parameter bit PARALLEL_TAGE = 0,
+                          parameter bit TARGET_INPUT = 0) (  // jal and branch targets come from target_i
   input  wire clk_i, rst_i,
-  input  wire [63:0] pc_i, instruction_i,
+  input  wire [63:0] pc_i, instruction_i, target_i,
   input  wire [1:0] take_i,
   input  wire redirect_i, repair_i,
   input  wire [CHECKPOINT_BITS-1:0] repair_checkpoint_i,
   input  wire [1:0] retire_i,
   input  wire [63:0] retire_instruction_i, retire_pc_i, retire_next_i,
 
-  // outputs
   output logic [1:0] taken_o,
   output logic [63:0] target_o,
   output logic [2*CHECKPOINT_BITS-1:0] checkpoint_o
 );
+
   localparam int IW = $clog2(ENTRIES);
   logic [ENTRIES-1:0][1:0] counter_q;
   logic [HISTORY_BITS-1:0] ghr_q, commit_ghr_q;
@@ -28,6 +26,7 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
   logic [63:0][31:2] jalr_target_q;  // retired jalr targets are word aligned
   logic [63:0] jalr_valid_q;
 
+  // direction prediction and retirement training history
   wire [1:0] tage_taken, train_drop;
   logic [1:0][HISTORY_BITS-1:0] train_history;  // commit history before each retiring lane's own branch
   if (TAGE) begin : tage_direction
@@ -41,7 +40,7 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
       assign update[lane] = retire_i[lane] && retire_instruction_i[lane*32 +: 7] == 7'h63;
       assign outcome[lane] = retire_next_i[lane*32 +: 32] != retire_pc_i[lane*32 +: 32] + 32'd4;
     end
-    // Retired branches train one per cycle, in order, from the predictor's queue, hashed with the history they retired under.
+    // TAGE trains queued branches in retirement order using each branch's committed history.
     tage_predictor #(.LOOKUPS(2), .UPDATES(2), .EXTERNAL_HISTORY(1), .TRAIN_QUEUE(1), .SERIAL_LOOKUPS(!PARALLEL_TAGE)) direction (
       .clk_i, .rst_i, .lookup_valid_i(2'b11), .lookup_pc_i(pc_i), .lookup_history_i(ghr_q),
       .lookup_branch_i(branch), .lookup_path_i(path), .lookup_taken_o(tage_taken),
@@ -57,15 +56,16 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
   function automatic logic link(input logic [4:0] r);
     return r == 5'd1 || r == 5'd5;
   endfunction
+
   function automatic logic is_call(input logic [6:0] op, input logic [4:0] rd);
     return (op == 7'h6f || op == 7'h67) && link(rd);
   endfunction
+
   function automatic logic is_return(input logic [6:0] op, input logic [4:0] rd, rs1);
     return op == 7'h67 && link(rs1) && !link(rd);
   endfunction
 
-  // fetch prediction and speculative history
-  // lane 1 sees lane 0's speculative effect; at most one stack operation per cycle (lane 0 first).
+  // lane-ordered prediction and speculative history; at most one stack operation per cycle.
   logic [HISTORY_BITS-1:0] ghr_next;
   logic [2:0] ptr_next;
   logic push;
@@ -87,13 +87,12 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
       automatic logic is_branch = ins[6:0] == 7'h63;
       automatic logic is_jalr = ins[6:0] == 7'h67;
       target_o[lane*32 +: 32] = is_jalr ? (is_return(ins[6:0], ins[11:7], ins[19:15]) ? ras_q[p - 3'd1] : {jalr_target_q[pc[7:2]], 2'b00})
-                                        : pc + (ins[6:0] == 7'h6f ? jal : branch);
+                                        : TARGET_INPUT ? target_i[lane*32 +: 32] : pc + (ins[6:0] == 7'h6f ? jal : branch);
       taken_o[lane] = (ins[6:0] == 7'h6f || (is_branch && (TAGE ? tage_taken[lane] : counter_q[pc[IW+1:2] ^ IW'(g)][1]))
           || (is_jalr && (is_return(ins[6:0], ins[11:7], ins[19:15]) || jalr_valid_q[pc[7:2]])))
         && target_o[lane*32 +: 2] == 2'b00;
-      // history records whether control left the fall-through path, matching retirement: a branch
-      // to pc+4 counts as not taken whatever its condition.
-      if (is_branch) g = {g[HISTORY_BITS-2:0], taken_o[lane] && target_o[lane*32 +: 32] != pc + 32'd4};
+      // history records departure from fall-through; a branch to pc+4 counts as not taken.
+      if (is_branch) g = {g[HISTORY_BITS-2:0], taken_o[lane] && branch != 32'd4};
       if (!stack_used && is_return(ins[6:0], ins[11:7], ins[19:15])) begin
         p = p - 3'd1;
         stack_used = 1;
@@ -151,9 +150,10 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
   end
 
   wire unused = ^{retire_instruction_i[63:52], retire_instruction_i[46:44],
-                  retire_instruction_i[31:20], retire_instruction_i[14:12], train_drop, train_history};  // train_drop is a bench counter
+                  retire_instruction_i[31:20], retire_instruction_i[14:12], train_drop, train_history,
+                  target_i};  // train_drop is a bench counter
 
-  // predictor storage and recovery
+  // retirement trains tables; recovery restores history and the RAS pointer, not overwritten RAS entries.
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       for (int n = 0; n < ENTRIES; n++) counter_q[n] <= 2'b01;
@@ -189,7 +189,7 @@ module branch_predictor #(parameter int ENTRIES = 256, parameter bit TAGE = 0,
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (!rst_i && TAGE && PARALLEL_TAGE)
     assert (!take_i[1] || (take_i[0] && instruction_i[6:0] != 7'h63))

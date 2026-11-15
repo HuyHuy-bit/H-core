@@ -13,13 +13,13 @@ module tage_parallel_tb;
   wire [63:0] serial_target, parallel_target;
   wire [71:0] serial_checkpoint, parallel_checkpoint;
   branch_predictor #(.TAGE(1)) serial (
-    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .take_i(take),
+    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .target_i(64'd0), .take_i(take),
     .redirect_i(redirect), .repair_i(repair), .repair_checkpoint_i(checkpoint),
     .retire_i(retire), .retire_pc_i(retire_pc), .retire_instruction_i(retire_instruction), .retire_next_i(retire_next),
     .taken_o(serial_taken), .target_o(serial_target), .checkpoint_o(serial_checkpoint)
   );
   branch_predictor #(.TAGE(1), .PARALLEL_TAGE(1)) parallel (
-    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .take_i(take),
+    .clk_i(clk), .rst_i(rst), .pc_i(pc), .instruction_i(instruction), .target_i(64'd0), .take_i(take),
     .redirect_i(redirect), .repair_i(repair), .repair_checkpoint_i(checkpoint),
     .retire_i(retire), .retire_pc_i(retire_pc), .retire_instruction_i(retire_instruction), .retire_next_i(retire_next),
     .taken_o(parallel_taken), .target_o(parallel_target), .checkpoint_o(parallel_checkpoint)
@@ -37,6 +37,7 @@ module tage_parallel_tb;
       default: return 32'h00108093;
     endcase
   endfunction
+
   task automatic compare_state;
     if (serial.ghr_q !== parallel.ghr_q || serial.ghr_next !== parallel.ghr_next
         || serial.commit_ghr_q !== parallel.commit_ghr_q || serial.ras_ptr_q !== parallel.ras_ptr_q
@@ -57,6 +58,7 @@ module tage_parallel_tb;
           && serial.tage_direction.direction.train_queue.queue_q[k] !== parallel.tage_direction.direction.train_queue.queue_q[k])
         $fatal(1, "PARALLEL_QUEUE_STATE");
   endtask
+
   initial begin
     automatic int differences = 0, blocked = 0, pairs = 0, plus4 = 0, invalid = 0, repairs = 0, dual_train = 0;
     repeat (2) @(negedge clk);

@@ -1,9 +1,9 @@
 `default_nettype none
 // 16-entry unified issue queue: wakeup on accepted writebacks, oldest-first select for two ports.
 module issue_queue (
-  // inputs
   input  wire clk_i, rst_i, flush_i,
   input  wire recover_i,
+  input  wire hold_i,            // no dispatch or issue: covers every flush and recovery cycle, from registered state
   input  wire [4:0] head_slot_i, recover_slot_i,
   input  wire [1:0] dispatch_i,
   input  wire [25:0] dispatch_id_i,
@@ -14,8 +14,10 @@ module issue_queue (
   input  wire [1:0] wb_accept_i,
   input  wire [11:0] wb_destination_i,
   input  wire [1:0] port_ready_i,
+  // early results are already in stage or producer registers when their consumers issue.
+  input  wire [5:0] early_valid_i,
+  input  wire [35:0] early_destination_i,
 
-  // outputs
   output logic [1:0] dispatch_ready_o,
   output logic [1:0] issue_o,
   output logic [25:0] issue_id_o,
@@ -24,20 +26,21 @@ module issue_queue (
   output logic [127:0] issue_payload_o,
   output logic [4:0] occupancy_o
 );
+
   logic [15:0] valid_q;
   logic [12:0] id_q [16];
   logic [11:0] source_q [16];
   logic [1:0] ready_q [16], eligible_q [16];
   logic [5:0] destination_q [16];
   logic [63:0] payload_q [16];
-  logic [1:0] awake [16];
+  logic [1:0] awake [16], early [16];
   logic [15:0] chosen [2], candidate [2], older [16];
   logic [15:0] first0, first1, second1, select1;
-  logic [15:0][4:0] age;
+  logic [15:0] wrapped;
   logic launch0;
   logic [3:0] free_slot [2];
   logic found_free;
-  wire stop = rst_i || flush_i || recover_i;
+  wire stop = rst_i || hold_i;
 
   // dispatch capacity and free slots
   always_comb begin
@@ -57,12 +60,15 @@ module issue_queue (
     dispatch_ready_o[1] = !stop && occupancy_o < 15;
   end
 
-  // operand wakeup
-  // only the backend's accepted writes may wake a resident instruction.
+  // operand wakeup from accepted writebacks and early result registers
   always_comb begin
     for (int slot = 0; slot < 16; slot++) begin
       awake[slot] = ready_q[slot];
+      early[slot] = 0;
       for (int operand = 0; operand < 2; operand++) begin
+        for (int port_id = 0; port_id < 6; port_id++)
+          if (early_valid_i[port_id] && early_destination_i[port_id*6 +: 6] == source_q[slot][operand*6 +: 6])
+            early[slot][operand] = 1;
         awake[slot][operand] = awake[slot][operand] || source_q[slot][operand*6 +: 6] == 0;
         for (int lane = 0; lane < 2; lane++)
           if (wb_accept_i[lane] && wb_destination_i[lane*6 +: 6] != 0
@@ -72,6 +78,7 @@ module issue_queue (
     end
   end
 
+  // balanced single-candidate detection
   function automatic logic exactly_one(input logic [15:0] mask);
     logic [15:0] any_node, multiple_node;
     any_node = mask;
@@ -85,9 +92,7 @@ module issue_queue (
     return any_node[0] && !multiple_node[0];
   endfunction
 
-  // oldest-ready issue selection
-  // port zero selects first; rob-relative age is independent of iq storage order.
-  // Age ordering precedes wakeup; both ports rank ready candidates in parallel.
+  // parallel oldest-ready ranking by ROB age; port zero wins a shared first choice.
   always_comb begin
     issue_o = 0;
     issue_id_o = 0;
@@ -95,14 +100,16 @@ module issue_queue (
     issue_destination_o = 0;
     issue_payload_o = 0;
     for (int slot = 0; slot < 16; slot++) begin
-      age[slot] = 5'(id_q[slot][4:0] - head_slot_i);
+      wrapped[slot] = id_q[slot][4:0] < head_slot_i;
       for (int port_id = 0; port_id < 2; port_id++)
-        candidate[port_id][slot] = valid_q[slot] && (&awake[slot]) && eligible_q[slot][port_id];
+        candidate[port_id][slot] = valid_q[slot] && (&(awake[slot] | early[slot])) && eligible_q[slot][port_id];
     end
     for (int slot = 0; slot < 16; slot++) older[slot] = 0;
     for (int slot = 0; slot < 16; slot++)
       for (int other = 0; other < slot; other++) begin
-        older[slot][other] = age[other] <= age[slot];
+        // compare raw slots within each wrap region; unwrapped entries are older.
+        older[slot][other] = wrapped[other] == wrapped[slot]
+            ? id_q[other][4:0] <= id_q[slot][4:0] : !wrapped[other];
         older[other][slot] = !older[slot][other];
       end
     for (int slot = 0; slot < 16; slot++) begin
@@ -130,7 +137,7 @@ module issue_queue (
     else begin
       for (int slot = 0; slot < 16; slot++) begin
         if (valid_q[slot]) ready_q[slot] <= awake[slot];
-        if (recover_i && 5'(id_q[slot][4:0] - head_slot_i) > 5'(recover_slot_i - head_slot_i))
+        if (recover_i && (wrapped[slot] == (recover_slot_i < head_slot_i) ? id_q[slot][4:0] > recover_slot_i : wrapped[slot]))
           valid_q[slot] <= 0;
         if (chosen[0][slot] || chosen[1][slot]) valid_q[slot] <= 0;
       end
@@ -148,9 +155,10 @@ module issue_queue (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
+    assert (!(flush_i || recover_i) || hold_i) else $fatal(1, "IQ_HOLD");
     if (!stop) begin
       assert (dispatch_i != 2'b10 && (dispatch_i & ~dispatch_ready_o) == 0) else $fatal(1, "IQ_DISPATCH");
       for (int lane = 0; lane < 2; lane++) begin

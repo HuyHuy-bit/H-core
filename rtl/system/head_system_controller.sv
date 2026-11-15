@@ -15,6 +15,7 @@ module head_system_controller #(parameter bit CLEAN = 0, parameter bit M_EXTENSI
   input  wire illegal_accept_i,
   input  wire trap_accept_i,
   input  wire clean_done_i,
+
   output wire prepare_o, busy_o,
   output wire serial_offer_o,
   output wire [12:0] serial_id_o,
@@ -30,8 +31,10 @@ module head_system_controller #(parameter bit CLEAN = 0, parameter bit M_EXTENSI
   output wire invalidate_o,                // one-cycle l1_icache invalidate after that clean
   output wire fence_i_o                    // fence.i at the head before its invalidate: no new fetch request
 );
+
   import core_pkg::*;
   import commit_event_pkg::*;
+
   decoded_t decoded;
   commit_event_t saved_q, base_event;
   logic [12:0] id_q;
@@ -55,6 +58,7 @@ module head_system_controller #(parameter bit CLEAN = 0, parameter bit M_EXTENSI
   wire accepted_trap = trap_valid_o && trap_accept_i;
   wire accepted_illegal = illegal_offer_o && illegal_accept_i;
 
+  // head-service admission and completion handshakes
   decoder decode (.instruction_i, .decoded_o(decoded));
   assign prepare_o = prepare && !fault_valid_i;
   assign busy_o = response_valid;
@@ -143,6 +147,7 @@ module head_system_controller #(parameter bit CLEAN = 0, parameter bit M_EXTENSI
     .legal_o(legal), .read_o(unused_state[64]), .value_o(value), .next_pc_o(next_pc), .effects_o(effects),
     .mtvec_o(unused_state[63:32]), .mepc_o(unused_state[31:0])
   );
+  // head-service ownership and atomicity assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i && !cancel_i) begin

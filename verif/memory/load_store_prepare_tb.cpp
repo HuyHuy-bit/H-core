@@ -12,16 +12,19 @@ struct Input {
     unsigned id=0;
     uint32_t instruction=0x00002083, pc=0, source1=0, source2=0;
 };
+
 struct Descriptor {
     unsigned id=0, mask=0, size=0;
     uint32_t instruction=0, pc=0, source1=0, source2=0, address=0, data=0, cause=0, value=0;
     bool store=false, unsign=false, uncached=false, head=false, fault=false;
 };
+
 static uint32_t instruction(bool store,unsigned kind,unsigned rs1,unsigned rs2,unsigned rd,int immediate) {
     const unsigned imm=unsigned(immediate)&4095;
     return store ? (imm>>5)<<25 | rs2<<20 | rs1<<15 | kind<<12 | (imm&31)<<7 | 0x23
                  : imm<<20 | rs1<<15 | kind<<12 | rd<<7 | 3;
 }
+
 static Descriptor reference(const Input& in) {
     Descriptor e; e.id=in.id; e.instruction=in.instruction; e.pc=in.pc;
     e.store=(in.instruction&127)==0x23;
@@ -57,15 +60,18 @@ static Descriptor reference(const Input& in) {
     }
     return e;
 }
+
 struct Bench {
     Vload_store_prepare d;
     Descriptor held;
     bool pending=false;
     unsigned cycles=0;
     std::map<std::string,unsigned> coverage;
+
     void require(bool good,const std::string& why) const {
         if (!good) throw std::runtime_error("load store prepare mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     void tick(const Input& in={}) {
         d.clk_i=0; d.rst_i=in.reset; d.flush_i=in.flush; d.launch_i=in.launch; d.take_i=in.take;
         d.id_i=in.id; d.instruction_i=in.instruction; d.pc_i=in.pc; d.source1_i=in.source1; d.source2_i=in.source2;
@@ -111,6 +117,7 @@ struct Bench {
         }
         cycles++;
     }
+
     void command(Input in,unsigned stalls=3) {
         in.launch=true; tick(in);
         for (unsigned n=0;n<stalls;n++) {
@@ -120,6 +127,7 @@ struct Bench {
         Input done; done.take=true; tick(done); tick();
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

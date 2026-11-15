@@ -14,5 +14,5 @@
   "scope": "Standalone full-size IQ with synthetic live ROB, dispatch, accepted writeback and execution readiness. No connected backend/IQ integration, instruction execution, memory launch, CSR/MMIO serialization, frontend, integrated formal proof or complete OOO processor acceptance. Generic synthesis does not close the A1 physical issue/read/execute timing gate.",
   "seeds": [1, 42, 20260915],
   "random_cycles_per_seed": 20000,
-  "directed_cycles": 364
+  "directed_cycles": 367
 }

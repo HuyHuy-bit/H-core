@@ -10,6 +10,13 @@ void empty(Check& c,std::mt19937& rng) {
         c.run(in);
     }
 }
+// the cycle after an accepted mispredict restores it; read the youngest tags while they are reclaimed.
+void recovery_cycle(Check& c) {
+    Input in;
+    for(unsigned port=0;port<4&&port<c.queue.size();++port)in.read[port]=c.queue[c.queue.size()-1-port].destination;
+    c.run(in);
+}
+
 void directed(Check& c,std::mt19937& rng) {
     Input in;in.reset=true;c.run(in);
     for(unsigned r=1;r<32;++r) {in={};in.count=1;in.rd[0]=r;c.run(in);empty(c,rng);}
@@ -25,7 +32,7 @@ void directed(Check& c,std::mt19937& rng) {
     in={};in.complete={c.result(1,rng),c.result(2,rng)};c.run(in);
     in={};in.resolve=true;in.mispredict=true;in.resolve_id=c.queue.front().id;
     in.complete[0]=c.result(0,rng);in.read={c.queue[1].destination,c.queue[2].destination,0,0};c.run(in);
-    empty(c,rng);
+    recovery_cycle(c);empty(c,rng);
     in={};in.reset=true;c.run(in);
     for(unsigned i=0;i<16;++i){in={};in.count=2;in.retire_ready=0;c.run(in);}
     in={};in.count=2;c.run(in);
@@ -36,12 +43,14 @@ void directed(Check& c,std::mt19937& rng) {
     const auto killed=c.result(3,rng);
     in={};in.resolve=true;in.mispredict=true;in.resolve_id=c.queue[2].id;
     in.complete={c.result(1,rng),c.result(2,rng)};in.read={c.queue[1].destination,c.queue[2].destination,0,0};c.run(in);
+    recovery_cycle(c);
     in={};in.count=2;in.rd={4,5};c.run(in);
     in={};in.complete[0]=killed;in.read[0]=c.queue.back().destination;c.run(in);empty(c,rng);
     for(unsigned i=0;i<8;++i){in={};in.count=1;in.cfi=1;in.rd[0]=i+1;c.run(in);}
     in={};in.count=1;in.cfi=1;in.rd[0]=9;in.resolve=true;in.resolve_id=c.queue[3].id;c.run(in);
     in={};in.count=1;in.cfi=1;in.rd[0]=9;c.run(in);
-    in={};in.resolve=true;in.resolve_id=c.queue[3].id;in.mispredict=true;c.run(in);
+    // a stale correct resolution must not release the checkpoint slot the next branch reused
+    in={};in.resolve=true;in.resolve_id=c.queue[3].id;c.run(in);
     in={};in.count=1;in.cfi=1;in.rd[0]=10;in.resolve=true;in.resolve_id=c.queue[6].id;c.run(in);
     in={};in.resolve=true;in.resolve_id=c.queue[1].id;in.mispredict=true;in.complete[0]=c.result(0,rng);c.run(in);empty(c,rng);
     for(unsigned i=0;i<16;++i){in={};in.count=2;in.rd={1,1};in.retire_ready=0;c.run(in);}
@@ -57,6 +66,7 @@ void directed(Check& c,std::mt19937& rng) {
     in={};in.count=2;c.run(in);in={};in.drain=true;c.run(in);
     in={};in.count=2;in.rd={1,2};c.run(in);empty(c,rng);
 }
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

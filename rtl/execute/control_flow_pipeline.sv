@@ -1,7 +1,6 @@
 `default_nettype none
-// one-entry branch/jump/alu producer (issue port 0): executes, resolves the prediction, then completes.
+// port-zero branch/jump/ALU producer with independent resolution and completion handshakes.
 module control_flow_pipeline (
-  // inputs
   input  wire clk_i, rst_i, flush_i,
   input  wire launch_i,
   input  wire [12:0] id_i,
@@ -11,17 +10,21 @@ module control_flow_pipeline (
   input  wire resolve_take_i,
   input  wire take_i,
 
-  // outputs
   output wire ready_o, busy_o,
   output wire resolve_valid_o,
   output logic taken_o, mispredict_o,
   output wire [31:0] next_pc_o,
   output wire valid_o,
   output logic [12:0] id_o,
-  output commit_event_pkg::commit_event_t event_o
+  output commit_event_pkg::commit_event_t event_o,
+  output wire [31:0] result_o,   // this cycle's register result, before it is held
+  output wire held_o,            // a result is held, before flush gating
+  output wire recover_pending_o  // a mispredicted branch waits to resolve, before flush gating
 );
+
   import core_pkg::*;
   import commit_event_pkg::*;
+
   decoded_t decoded;
   wire [31:0] result, next_pc, cause, trap_value;
   wire execute_trap, taken;
@@ -29,13 +32,17 @@ module control_flow_pipeline (
   logic pending_q, cfi_q, resolved_q, done_q;
   commit_event_t built;
 
-  // a correct prediction may complete in the cycle it resolves; a mispredict or a trap resolves first, so recovery precedes completion.
+  // correct predictions may resolve and complete together; mispredicted branches resolve first.
   wire resolve_pending = cfi_q && !event_o.trap && !resolved_q;
   wire free = (!resolve_pending || resolve_take_i) && (done_q || take_i);
   assign busy_o = pending_q && !rst_i && !flush_i;
-  assign ready_o = !rst_i && !flush_i && (!pending_q || free);
-  assign resolve_valid_o = busy_o && resolve_pending;
-  assign valid_o = busy_o && !done_q && (!cfi_q || event_o.trap || resolved_q || !mispredict_o);
+  assign held_o = pending_q;
+  assign recover_pending_o = pending_q && resolve_pending && mispredict_o;
+  // offers use registered occupancy; flush clears the holder and the ROB blocks acceptance.
+  wire live = pending_q && !rst_i;
+  assign ready_o = !rst_i && (!pending_q || free);
+  assign resolve_valid_o = live && resolve_pending;
+  assign valid_o = live && !done_q && (!cfi_q || event_o.trap || resolved_q || !mispredict_o);
   assign next_pc_o = event_o.pc_after;
 
   // decode and execution datapath
@@ -46,6 +53,8 @@ module control_flow_pipeline (
     .result_o(result), .next_pc_o(next_pc), .address_o(),
     .trap_o(execute_trap), .cause_o(cause), .trap_value_o(trap_value), .taken_o(taken)
   );
+
+  assign result_o = built.rd_value;
 
   // completion event construction
   always_comb begin
@@ -70,8 +79,7 @@ module control_flow_pipeline (
     end
   end
 
-  // prediction resolution and result holding
-  // resolution and completion are each acknowledged once, in either order for a correct prediction.
+  // resolution and completion each acknowledge once; correct predictions allow either order.
   always_ff @(posedge clk_i) begin
     if (rst_i || flush_i) begin
       pending_q <= 0;
@@ -95,7 +103,7 @@ module control_flow_pipeline (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i && !flush_i) begin

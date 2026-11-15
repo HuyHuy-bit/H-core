@@ -109,6 +109,7 @@ CAUSES = {"trap_instruction_address_misaligned": 0, "trap_instruction_access_fau
           "trap_store_access_fault": 7, "trap_machine_ecall": 11}
 
 
+# translate Spike observations into the shared architectural trace schema
 def spike_sail_trace(output: str, memory: dict, skip: int, substitutions: dict,
                      identity_reads: dict, mstatus: int) -> str:
     """Rewrite a pinned Spike -l --log-commits log into the Sail step format parse_sail_log reads.

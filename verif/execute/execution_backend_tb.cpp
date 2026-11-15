@@ -24,53 +24,66 @@ using rv32::extend;
 using rv32::illegal;
 using rv32::operation;
 using rv32::evaluate;
+
 struct Entry {
     unsigned id = 0, rd = 0, op = 0;
     uint32_t result = 0, next_pc = 0;
     std::array<int, 2> dependency{-1, -1};
     bool queued = true, done = false, resolved = false, fault = false, taken = false, miss = false, cleared_lsb = false;
     Event event{};
+
     bool cfi() const { return op >= 21; }
 };
+
 struct Input {
     unsigned count = 0, execute = 3, complete = 3, retire = 3;
     std::array<uint32_t, 2> insn{0x13,0x13}, pc{0,4}, predicted_pc{4,8};
     unsigned predicted_taken = 0;
     bool grant = true, reset = false, flush = false, drain = false;
 };
+
 class Check {
     std::array<uint32_t, 32> committed{};
     std::array<bool, 32> known{};
     std::array<unsigned, 32> uses{};
-    std::array<int, 2> held{-1,-1};
+    std::array<int, 2> held{-1,-1}, staged{-1,-1};  // staged: issued into the execute input stage, not yet launched
+    std::array<int, 2> waiting{-1,-1};              // a second issued packet per port, behind a held stage
     std::array<int, 8> checkpoints{-1,-1,-1,-1,-1,-1,-1,-1};
     std::array<unsigned, 8> checkpoint_uses{};
     unsigned tail = 0;
     uint64_t order = 0;
+    int recover_id = -1;  // a mispredict accepted last cycle: this cycle recovers it
 public:
     Vexecution_backend dut;
     std::deque<Entry> queue;
     std::map<std::string, unsigned> coverage;
     unsigned cycles = 0;
     Check() { known[0] = true; }
+
     void require(bool ok, const std::string& what) const {
         if (!ok) throw std::runtime_error("control flow backend mismatch cycle="+std::to_string(cycles)+" "+what);
     }
+
     unsigned locate(int id) const {
         for (unsigned n = 0; n < queue.size(); ++n) if (int(queue[n].id) == id) return n;
         return unsigned(queue.size());
     }
+
     unsigned resident() const {
         return unsigned(std::count_if(queue.begin(), queue.end(), [](const Entry& e) { return e.queued; }));
     }
+
     bool exhausted() const {
         return std::any_of(uses.begin(), uses.end(), [](unsigned n) { return n == 256; });
     }
+
     bool head_fault() const { return !queue.empty() && queue.front().done && queue.front().fault; }
+
     template<class T> void check_event(const T& data, unsigned lane, const Event& expected) const {
         for (unsigned b = 0; b < EVENT_BITS; ++b)
             require(bit(data, lane*EVENT_BITS+b) == bit(expected, b), "event bit="+std::to_string(b));
     }
+
     Entry build(uint32_t insn, uint32_t pc, unsigned id, bool predicted_taken, uint32_t predicted_pc) const {
         Entry e; e.id = id; e.op = unsigned(operation(insn));
         e.rd = e.op >= 21 && e.op <= 26 ? 0 : (insn >> 7)&31;
@@ -80,7 +93,7 @@ public:
         std::array<bool, 2> defined{known[a],known[b]};
         for (const auto& older : queue) for (unsigned operand = 0; operand < 2; ++operand)
             if (older.rd && older.rd == (operand ? b : a)) {
-                values[operand] = older.result; defined[operand] = true; e.dependency[operand] = int(older.id);
+                values[operand] = older.fault ? 0 : older.result; defined[operand] = true; e.dependency[operand] = int(older.id);
             }
         require(defined[0] && defined[1], "stimulus reads undefined initial register");
         e.result = evaluate(e.op, insn, pc, values[0], values[1]);
@@ -120,15 +133,17 @@ public:
         }
         return e;
     }
+
     unsigned run(const Input& in = {}) {
         ++cycles;
         const bool active = !in.reset && !in.flush;
-        unsigned busy = 0, supported = 0, cfi = 0, cp_mask = 0;
+        unsigned busy = 0, live = 0, supported = 0, cfi = 0, cp_mask = 0;
         for (unsigned lane = 0; lane < 2; ++lane) {
             int op = operation(in.insn[lane]);
             if (op >= 0 && !(in.pc[lane]&3)) supported |= 1U << lane;
             if (op >= 21) cfi |= 1U << lane;
             if (active && held[lane] >= 0) busy |= 1U << lane;
+            if (!in.reset && held[lane] >= 0) live |= 1U << lane;  // producers offer through a flush; the ROB takes nothing then
         }
         int free_cp = -1;
         for (int n = 7; n >= 0; --n) {
@@ -136,23 +151,28 @@ public:
             else free_cp = n;
         }
         unsigned resolver = locate(held[0]);
-        bool resolve_valid = (busy&1) && queue[resolver].cfi() && !queue[resolver].fault && !queue[resolver].resolved;
-        bool resolve = resolve_valid && in.grant;
-        bool redirect = resolve && queue[resolver].miss;
+        // mispredicts hold younger work through registered recovery; head faults also block resolution and completion.
+        const bool redirect = active && recover_id >= 0;
+        const bool fault = active && head_fault();
+        bool resolve_valid = (live&1) && queue[resolver].cfi() && !queue[resolver].fault && !queue[resolver].resolved;
+        bool resolve = active && resolve_valid && in.grant && !fault;
+        const bool recover_hold = redirect || (resolve_valid && queue[resolver].miss);
+        require(!redirect || held[0] == recover_id, "reference recovery holder");
         bool cancel = redirect && (busy&2) && locate(held[1]) > resolver;
-        unsigned pending = busy & 2;
+        unsigned pending = live & 2;
         // a correct prediction may complete before or with its resolve; a mispredict or a fault resolves (or needs no resolve) first
-        if ((busy&1) && !queue[resolver].done
+        if ((live&1) && !queue[resolver].done
             && (!queue[resolver].cfi() || queue[resolver].fault || queue[resolver].resolved || !queue[resolver].miss)) pending |= 1;
-        if (cancel) { busy &= ~2U; pending &= ~2U; }
-        unsigned complete = pending & in.complete, wb = 0;
+        unsigned complete = 0, wb = 0;
+        for (unsigned lane = 0; lane < 2; ++lane)
+            if (active && (pending & in.complete & (1U << lane)) && !fault && (!recover_hold || locate(held[lane]) <= resolver)) complete |= 1U << lane;
         for (unsigned lane = 0; lane < 2; ++lane) if (complete & (1U << lane)) {
             const auto& e = queue[locate(held[lane])];
             if (e.rd && !e.fault) wb |= 1U << lane;
         }
         auto retirement_ready = [](const Entry& e) { return e.done && !e.fault && (!e.cfi() || e.resolved); };
         unsigned rv = 0;
-        if (active && !redirect && !queue.empty() && retirement_ready(queue[0])) {
+        if (active && !recover_hold && !queue.empty() && retirement_ready(queue[0])) {
             rv = 1;
             if (queue.size() > 1 && retirement_ready(queue[1])) rv = 3;
         }
@@ -160,7 +180,7 @@ public:
         unsigned wanted = (1U << in.count)-1;
         unsigned selected = (cfi&1) ? wanted&1 : wanted;
         unsigned count = unsigned(__builtin_popcount(selected));
-        unsigned alloc = active && !redirect && !in.drain && !(selected & ~supported)
+        unsigned alloc = active && !recover_hold && !fault && !in.drain && !(selected & ~supported)
             && queue.size()+count <= 32 && resident()+count <= 16
             && (!(selected&cfi) || free_cp >= 0) ? selected : 0;
         for (unsigned lane = 0; lane < count; ++lane) if (uses[(tail+lane)%32] >= 256) alloc = 0;
@@ -170,10 +190,18 @@ public:
             const auto& h = queue[resolver];
             free0 = (h.done || (complete&1)) && (!h.cfi() || h.fault || h.resolved || resolve);
         }
-        std::array<int, 2> pick{-1,-1};
+        // a staged packet launches into its producer when the producer can take it; issue needs only an empty waiting slot.
+        const std::array<bool, 2> producer_ready{active && (held[0] < 0 || free0), active && !cancel && (held[1] < 0 || (complete & 2))};
+        std::array<bool, 2> launch{};
+        unsigned staged_mask = 0;
         for (unsigned port = 0; port < 2; ++port) {
-            const bool occupied = port ? (held[1] >= 0 && !(complete & 2)) : (held[0] >= 0 && !free0);
-            if (!active || redirect || !(in.execute & (1U << port)) || occupied) continue;
+            launch[port] = staged[port] >= 0 && producer_ready[port] && (in.execute & (1U << port)) && !recover_hold && !fault;
+            if (staged[port] >= 0 || waiting[port] >= 0) staged_mask |= 1U << port;
+        }
+        std::array<int, 2> pick{-1,-1};
+        std::array<bool, 2> early{}, ahead{}, from_held{};
+        for (unsigned port = 0; port < 2; ++port) {
+            if (!active || recover_hold || fault || waiting[port] >= 0) continue;
             for (unsigned n = 0; n < queue.size(); ++n) {
                 if (!queue[n].queued || (port && (pick[0] == int(n) || queue[n].cfi()))) continue;
                 bool ready = true;
@@ -181,11 +209,22 @@ public:
                     unsigned index = locate(dep);
                     if (index < queue.size() && (!queue[index].done || queue[index].fault)) {
                         bool bypass = false;
-                        for (unsigned lane = 0; lane < 2; ++lane) bypass |= (wb & (1U << lane)) && held[lane] == dep;
+                        // held nonfaulting results wake consumers immediately; accepted writes reach queue wakeup one cycle later.
+                        for (unsigned lane = 0; lane < 2; ++lane) bypass |= held[lane] == dep && !queue[index].fault;
+                        // issue-time wakeup from a staged producer, whose result is final while it waits in the stage.
+                        for (unsigned q = 0; q < 2; ++q) bypass |= staged[q] == dep;
                         ready &= bypass;
                     }
                 }
-                if (ready) { pick[port] = int(n); break; }
+                if (ready) {
+                    pick[port] = int(n);
+                    for (auto dep : queue[n].dependency) for (unsigned q = 0; q < 2; ++q) if (dep >= 0 && staged[q] == dep) {
+                        early[port] = true; ahead[port] = ahead[port] || !launch[q];
+                    }
+                    for (auto dep : queue[n].dependency) for (unsigned q = 0; q < 2; ++q)
+                        if (dep >= 0 && held[q] == dep && !queue[locate(dep)].done && !(complete & (1U << q))) from_held[port] = true;
+                    break;
+                }
             }
         }
         if (busy&1) {
@@ -211,8 +250,13 @@ public:
         require(dut.supported_o == supported, "supported instruction mask");
         require(dut.allocate_accept_o == alloc, "allocation");
         require(dut.occupancy_o == queue.size() && dut.issue_occupancy_o == resident(), "occupancy");
-        require(dut.producer_busy_o == busy, "held producer capacity/cancellation");
-        require(dut.completion_valid_o == pending && dut.completion_accept_o == complete && dut.wb_accept_o == wb, "completion control");
+        require(dut.producer_busy_o == ((busy & 1) | (pending & 2) | staged_mask), "held producer capacity/cancellation");
+        require(dut.completion_valid_o == pending && dut.completion_accept_o == complete && dut.wb_accept_o == wb, "completion control valid="+std::to_string(dut.completion_valid_o)+"/"+std::to_string(pending)
+            +" accept="+std::to_string(dut.completion_accept_o)+"/"+std::to_string(complete)+" wb="+std::to_string(dut.wb_accept_o)+"/"+std::to_string(wb)
+            +" hold="+std::to_string(recover_hold)+" redirect="+std::to_string(redirect)+" fault="+std::to_string(fault)
+            +" held="+std::to_string(locate(held[0]))+","+std::to_string(locate(held[1]))+" resolver="+std::to_string(resolver)+(resolver < queue.size() ? " op="+std::to_string(queue[resolver].op)+" done="+std::to_string(queue[resolver].done)
+            +" miss="+std::to_string(queue[resolver].miss)+"/"+std::to_string(dut.resolve_mispredict_o)+" resolved="+std::to_string(queue[resolver].resolved)
+            +" rv="+std::to_string(dut.resolve_valid_o) : std::string()));
         require(dut.resolve_valid_o == resolve_valid && dut.resolve_accept_o == resolve && dut.redirect_o == redirect, "resolution control");
         require(dut.retire_valid_o == rv && dut.retire_accept_o == retire, "retirement control");
         require(bool(dut.fault_pending_o) == (active && head_fault()), "head fault");
@@ -248,7 +292,16 @@ public:
                     if ((wb & (1U << w)) && held[w] == dep) ++coverage["wakeup_bypass"];
                 coverage["consume_refill"] += (complete & (1U << lane)) != 0;
                 coverage["branch_launch"] += e.cfi();
+                coverage["early_wakeup"] += early[lane];
+                coverage["early_ahead"] += ahead[lane];
+                coverage["held_wakeup"] += from_held[lane];
+                for (auto dep : e.dependency) {
+                    const unsigned index = locate(dep);
+                    coverage["early_fault_forward"] += early[lane] && index < queue.size() && queue[index].fault;
+                }
             }
+            coverage["stage_hold"] += active && staged[lane] >= 0 && !launch[lane];
+            coverage["stage_wait"] += active && waiting[lane] >= 0;
             if (rv & (1U << lane)) {
                 Event e = queue[lane].event; put(e, ORDER_OFFSET, 64, order+lane);
                 check_event(dut.retire_event_o, lane, e);
@@ -270,10 +323,11 @@ public:
         coverage["drain"] += in.drain;
         coverage["generation_stall"] += active && wanted && uses[tail] == 256 && !alloc;
         coverage["wrapped_window"] += !queue.empty() && tail < queue.front().id%32;
+        recover_id = active && resolve && queue[resolver].miss ? held[0] : -1;
         if (in.reset) {
-            queue.clear(); held = {-1,-1}; checkpoints.fill(-1); checkpoint_uses.fill(0);
+            queue.clear(); held = {-1,-1}; staged = {-1,-1}; waiting = {-1,-1}; checkpoints.fill(-1); checkpoint_uses.fill(0);
             uses.fill(0); committed.fill(0); known.fill(false); known[0] = true; order = 0; tail = 0;
-        } else if (in.flush) { queue.clear(); held = {-1,-1}; checkpoints.fill(-1); tail = 0; }
+        } else if (in.flush) { queue.clear(); held = {-1,-1}; staged = {-1,-1}; waiting = {-1,-1}; checkpoints.fill(-1); tail = 0; }
         else {
             if (resolve) {
                 auto& e = queue[resolver]; e.resolved = true;
@@ -282,22 +336,26 @@ public:
                 coverage["resolve_completion_stall"] += !(in.complete&1);
                 coverage["resolve_allocate"] += alloc != 0;
                 coverage["nested_resolve"] += __builtin_popcount(cp_mask) > 1;
-                for (auto& owner : checkpoints) if (owner == int(e.id) || (redirect && owner >= 0 && locate(owner) > resolver)) owner = -1;
-                if (redirect) {
-                    coverage["wrapped_recovery"] += e.id%32 < queue.front().id%32;
-                    for (unsigned n = resolver+1; n < queue.size(); ++n) {
-                        coverage["kill_queued"] += queue[n].queued;
-                        coverage["kill_completed"] += queue[n].done;
-                        coverage["kill_resolved_branch"] += queue[n].cfi() && queue[n].resolved;
-                        coverage["kill_fault"] += queue[n].fault && queue[n].done;
-                    }
-                    coverage["kill_held"] += cancel;
-                    coverage["surviving_held"] += (busy&2) != 0;
-                    coverage["surviving_wb"] += (wb&2) != 0;
-                    if (cancel) held[1] = -1;
-                    queue.resize(resolver+1); tail = (e.id%32+1)%32;
-                }
+                if (!e.miss) for (auto& owner : checkpoints) if (owner == int(e.id)) owner = -1;
                 if (held[0] >= 0 && queue[locate(held[0])].done) { ++coverage["late_resolve_frees"]; held[0] = -1; }
+            }
+            if (redirect) {
+                const auto& e = queue[resolver];
+                for (auto& owner : checkpoints) if (owner == int(e.id) || (owner >= 0 && locate(owner) > resolver)) owner = -1;
+                coverage["wrapped_recovery"] += e.id%32 < queue.front().id%32;
+                for (unsigned n = resolver+1; n < queue.size(); ++n) {
+                    coverage["kill_queued"] += queue[n].queued;
+                    coverage["kill_completed"] += queue[n].done;
+                    coverage["kill_resolved_branch"] += queue[n].cfi() && queue[n].resolved;
+                    coverage["kill_fault"] += queue[n].fault && queue[n].done;
+                }
+                coverage["kill_held"] += cancel;
+                coverage["surviving_held"] += (busy&2) && !cancel;
+                coverage["surviving_wb"] += (wb&2) != 0;
+                if (cancel) held[1] = -1;
+                for (auto& s : staged) if (s >= 0 && locate(s) > resolver) { s = -1; ++coverage["stage_redirect_kill"]; }
+                for (auto& s : waiting) if (s >= 0 && locate(s) > resolver) { s = -1; ++coverage["wait_redirect_kill"]; }
+                queue.resize(resolver+1); tail = (e.id%32+1)%32;
             }
             for (unsigned port = 0; port < 2; ++port) {
                 if (complete & (1U << port)) {
@@ -307,8 +365,11 @@ public:
                     if (e.fault) { ++coverage["fault_complete"]; ++coverage["fault_op_"+std::to_string(e.op)]; }
                     if (port || !e.cfi() || e.fault || e.resolved) held[port] = -1;
                 }
+                if (launch[port]) { held[port] = staged[port]; staged[port] = -1; }
+                if (staged[port] < 0) { staged[port] = waiting[port]; waiting[port] = -1; }  // the waiting packet moves up
                 if (pick[port] >= 0) {
-                    auto& e = queue[unsigned(pick[port])]; e.queued = false; held[port] = int(e.id);
+                    auto& e = queue[unsigned(pick[port])]; e.queued = false;
+                    (staged[port] < 0 ? staged[port] : waiting[port]) = int(e.id);
                 }
             }
             for (unsigned lane = 0; lane < 2; ++lane) if (retire & (1U << lane)) {
@@ -333,11 +394,12 @@ public:
                 }
                 queue.push_back(e); ++uses[tail]; tail = (tail+1)%32;
             }
-            if (in.drain) { require(queue.empty() && held[0] < 0 && held[1] < 0, "invalid stimulus drain"); uses.fill(0); }
+            if (in.drain) { require(queue.empty() && held[0] < 0 && held[1] < 0 && staged[0] < 0 && staged[1] < 0 && waiting[0] < 0 && waiting[1] < 0, "invalid stimulus drain"); uses.fill(0); }
         }
         dut.clk_i = 1; dut.eval(); dut.clk_i = 0; dut.eval();
         return alloc;
     }
+
     void drain() {
         for (unsigned n = 0; !queue.empty(); ++n) {
             require(n < 300, "progress watchdog");
@@ -345,19 +407,23 @@ public:
         }
         run();
     }
+
     unsigned send(uint32_t a, uint32_t b = 0x13, unsigned count = 2, uint32_t pc = 0x80000000U) {
         Input i; i.count = count; i.insn = {a,b}; i.pc = {pc,pc+4}; i.predicted_pc = {pc+4,pc+8};
         for (unsigned n = 0;; ++n) { unsigned accepted = run(i); if (accepted) return accepted; require(n < 300, "dispatch progress watchdog"); }
     }
+
     void initialize() {
         for (unsigned r = 1; r < 32; r += 2)
             send(instruction(0,r,0,0,r*0x12345000U),instruction(0,(r+1)%32,0,0,(r+1)*0xabcde000U),r == 31 ? 1 : 2);
         drain();
     }
+
     void constant(unsigned reg, uint32_t v) {
         send(instruction(0,reg,0,0,v+0x800U),instruction(2,reg,reg,0,v)); drain();
     }
 };
+
 void cf_case(Check& c, uint32_t word, uint32_t pc, unsigned prediction) {
     auto e = c.build(word,pc,0,false,pc+4);
     Input i; i.count = 2; i.insn = {word,0}; i.pc = {pc,pc+4};
@@ -370,17 +436,29 @@ void cf_case(Check& c, uint32_t word, uint32_t pc, unsigned prediction) {
     for (unsigned n = 0; n < 3; ++n) c.run(i);
     c.drain();
 }
+// park an older dependency in port one so branch recovery must kill a younger resolved or faulting jump.
 void nested(Check& c, bool fault) {
-    c.send(instruction(2,10,0,0,1),0x13,1);
-    Input i; i.execute = 2; i.complete = 0; i.grant = false; c.run(i);
-    i.execute = 1; i.count = 1; i.insn[0] = instruction(22,0,10,0,16); c.run(i);
+    Input i; i.execute = 1; i.complete = 1;                  // port one's stage never launches
+    i.count = 2; c.run(i);                                   // two fillers: one per port
+    i.insn = {0x13,instruction(2,10,0,0,1)}; c.run(i);       // the producer goes behind the held port-one filler
+    i.count = 1; i.grant = false; i.insn[0] = instruction(22,0,10,0,16); c.run(i);
     i.insn[0] = instruction(27,16,0,0,fault ? 2 : 16); c.run(i);
-    i.count = 0; c.run(i);
-    i.grant = true; i.complete = 1; c.run(i); c.run(i);
-    i.complete = 2; c.run(i);
-    i.complete = 0; c.run(i); c.drain();
+    i.count = 0; c.run(i); c.run(i);
+    i.grant = true; c.run(i); c.run(i); c.run(i);
+    i.execute = 3; i.complete = 3; c.run(i); c.drain();
     c.send(instruction(2,17,16,0,0)); c.drain();
 }
+// exercise staged-result wakeup and a faulting-jump dependent that is flushed before retirement.
+void early_cases(Check& c) {
+    c.send(instruction(2,11,0,0,5),0x13,1);
+    Input i; i.execute = 2; i.count = 1; i.insn[0] = instruction(2,12,11,0,1); c.run(i);
+    i.count = 0; i.execute = 1; c.run(i); c.run(i);
+    c.drain();
+    c.send(instruction(27,13,0,0,2),0x13,1);
+    c.send(instruction(2,14,13,0,1),0x13,1);
+    c.run(); c.drain();
+}
+
 void directed(Check& c) {
     Input i; i.reset = true; c.run(i); c.initialize();
     const uint32_t values[] = {0,1,UINT32_MAX,0x80000000U,0x7fffffffU,0x55555555U,0xaaaaaaaaU,31,32,63};
@@ -407,21 +485,22 @@ void directed(Check& c) {
     i.insn = {instruction(2,5,0,0,0x140),instruction(28,5,5,0,1)};
     i.predicted_taken = 2; i.predicted_pc[1] = 0x140; c.run(i); c.drain();
 
-    // Resolve a branch while a younger ALU result is held and another younger entry remains queued.
+    // resolve a branch with younger work held both in the port-one producer and in the execute stage.
     c.send(instruction(21,0,0,0,16),0x13,1,0x1000);
     i = {}; i.grant = false; i.complete = 0; i.count = 2;
     i.insn = {instruction(2,6,0,0,66),instruction(2,7,0,0,77)}; c.run(i);
-    i.count = 0; i.execute = 2; c.run(i); c.run(i);
+    i.count = 0; c.run(i); i.execute = 2; c.run(i);
     i.grant = true; i.complete = 3; c.run(i); c.drain();
     c.send(instruction(2,8,6,0,1),instruction(2,9,7,0,1)); c.drain();
 
     // An older held result survives the same recovery and may write back in its winning cycle.
     c.send(instruction(2,10,0,0,111),0x13,1);
-    i = {}; i.execute = 2; i.complete = 0; c.run(i);
+    i = {}; i.execute = 2; i.complete = 0; c.run(i); c.run(i);
     i.execute = 1; i.grant = false; i.count = 1; i.insn[0] = instruction(21,0,0,0,16); c.run(i);
-    i.count = 0; c.run(i);
+    i.count = 0; c.run(i); c.run(i);
     i.grant = true; i.complete = 2; c.run(i); c.drain();
     nested(c,false); nested(c,true);
+    early_cases(c);
     // A correct resolution can free a checkpoint while a different checkpoint is allocated.
     c.send(instruction(22,0,0,0,16),0x13,1,0);
     i = {}; i.grant = false; c.run(i);
@@ -444,22 +523,26 @@ void directed(Check& c) {
     }
     i = {}; i.count = 2; i.pc[1] = 6; c.run(i);
 
-    // Compare age across the ring boundary in both cancellation directions.
+    // test both cancellation directions across the ROB ring boundary using paired port-zero/port-one launches.
     for (unsigned older = 0; older < 2; ++older) {
         i = {}; i.reset = true; c.run(i);
-        for (unsigned n = 0; n < (older ? 31U : 30U); ++n) c.send(0x13,0x13,1);
+        for (unsigned n = 0; n < (older ? 30U : 31U); ++n) c.send(0x13,0x13,1);
         c.drain();
-        c.send(0x13,0x13,1);
         if (older) {
-            i = {}; i.execute = 2; i.complete = 0; c.run(i);
-            i.count = 1; i.insn[0] = instruction(21,0,0,0,16); i.execute = 1; i.grant = false; c.run(i);
-            i.count = 0; c.run(i); i.grant = true; i.complete = 2; c.run(i);
+            // slots 30 and 31 issue together; slot 31 is held in port one and survives the recovery of slot 0.
+            i = {}; i.count = 2; i.complete = 1; c.run(i);
+            i.count = 0; c.run(i); c.run(i);
+            i.count = 1; i.insn[0] = instruction(21,0,0,0,16); i.grant = false; c.run(i);
+            i.count = 0; c.run(i); c.run(i);
+            i.grant = true; c.run(i);
         } else {
-            i = {}; i.retire = 0; i.grant = false; i.count = 1;
+            // launch slot-one work with the slot-31 branch, then cancel it during wraparound recovery.
+            i = {}; i.retire = 0; i.grant = false; i.complete = 1; i.execute = 0; i.count = 1;
             i.insn[0] = instruction(21,0,0,0,16); c.run(i);
-            i.insn[0] = instruction(2,6,0,0,66); i.complete = 1; c.run(i);
-            i.count = 0; i.execute = 2; i.complete = 0; c.run(i);
-            i.grant = true; i.complete = 3; c.run(i);
+            i.count = 2; i.insn = {0x13,instruction(2,6,0,0,66)}; c.run(i);
+            i.count = 0; c.run(i);
+            i.execute = 3; c.run(i); c.run(i);
+            i.grant = true; c.run(i);
         }
         c.drain();
     }
@@ -476,6 +559,7 @@ void directed(Check& c) {
     i = {}; i.drain = true; c.run(i); c.send(0x13,0x13); c.drain();
     i = {}; i.reset = true; c.run(i); c.initialize();
 }
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     try {

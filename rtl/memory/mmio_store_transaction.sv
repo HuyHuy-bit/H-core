@@ -1,7 +1,6 @@
 `default_nettype none
 // one uncached (mmio) store or store fault: waits for the rob head, writes once, never cancels once offered.
 module mmio_store_transaction (
-  // inputs
   input  wire clk_i, rst_i, kill_i,
   input  wire launch_i,
   input  wire [12:0] id_i,
@@ -17,7 +16,6 @@ module mmio_store_transaction (
   input  memory_protocol_pkg::mem_response_t response_i,
   input  wire take_i,
 
-  // outputs
   output wire ready_o,
   output wire authorize_o,
   output wire request_valid_o,
@@ -32,7 +30,9 @@ module mmio_store_transaction (
   output logic fatal_o,
   output logic [2:0] fatal_reason_o
 );
+
   import memory_protocol_pkg::*;
+
   typedef enum logic [2:0] {EMPTY, WAIT_HEAD, REQUEST, RESPONSE, RESULT} state_e;
   state_e state_q;
   logic [12:0] owner_q;
@@ -47,6 +47,7 @@ module mmio_store_transaction (
   wire [31:0] data_mask = {{8{byte_mask_i[3]}}, {8{byte_mask_i[2]}},
     {8{byte_mask_i[1]}}, {8{byte_mask_i[0]}}};
 
+  // head authorization, request ownership and result handshakes
   assign ready_o = active && !kill_i && !response_valid_i && state_q == EMPTY;
   assign busy_o = !rst_i && state_q != EMPTY;
   assign owner_id_o = busy_o ? owner_q : 13'd0;
@@ -86,8 +87,7 @@ module mmio_store_transaction (
     end
   end
 
-  // uncached-store ownership and completion
-  // authorization reserves the port; offered device writes remain owned through result acceptance.
+  // uncached-store state; authorization owns the offered write through result acceptance.
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       state_q <= EMPTY;
@@ -128,7 +128,7 @@ module mmio_store_transaction (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) if (!rst_i) begin
     assert (!launch_i || ready_o) else $fatal(1, "MMIO_STORE_CAPACITY");

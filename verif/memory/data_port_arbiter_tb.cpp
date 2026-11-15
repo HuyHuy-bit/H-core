@@ -14,12 +14,14 @@
 using packed_bits::put;
 using Request=std::array<uint32_t,(REQUEST_BITS+31)/32>;
 using Response=std::array<uint32_t,(RESPONSE_BITS+31)/32>;
+
 struct Input {
     bool reset=false, request_ready=false, response_valid=false;
     unsigned reserve=0, fatal=0, request_valid=2, response_ready=0;
     std::array<Request,3> requests{};
     Response response{};
 };
+
 struct Bench {
     Vdata_port_arbiter d;
     std::mt19937 rng;
@@ -32,14 +34,18 @@ struct Bench {
     std::map<std::string,unsigned> count;
     std::array<std::bitset<REQUEST_BITS>,3> request_bits;
     std::array<std::bitset<RESPONSE_BITS>,3> response_bits;
+
     explicit Bench(unsigned seed):rng(seed) {}
+
     void require(bool ok,const std::string& why) const {
         if (!ok) throw std::runtime_error("data port mismatch cycle="+std::to_string(cycles)+": "+why);
     }
+
     template<class A,class B> bool equal(const A& a,const B& b,unsigned bits) const {
         for (unsigned n=0;n<bits;++n) if (packed_bits::bit(a,n)!=packed_bits::bit(b,n)) return false;
         return true;
     }
+
     Input input(unsigned id=0) {
         Input i;
         for (auto& p:i.requests) { for (auto& word:p) word=rng(); put(p,REQUEST_TRANSACTION_ID_OFFSET,4,id); }
@@ -47,6 +53,7 @@ struct Bench {
         put(i.response,RESPONSE_TRANSACTION_ID_OFFSET,4,id);
         return i;
     }
+
     void drive(const Input& i) {
         d.clk_i=0; d.rst_i=i.reset; d.reserve_i=i.reserve; d.client_fatal_i=i.fatal;
         d.client_request_valid_i=i.request_valid; d.client_response_ready_i=i.response_ready;
@@ -56,6 +63,7 @@ struct Bench {
             put(d.client_request_i,c*REQUEST_BITS+n,1,packed_bits::bit(i.requests[c],n));
         for (unsigned n=0;n<i.response.size();++n) d.response_i[n]=i.response[n];
     }
+
     void step(Input i) {
         drive(i); d.eval();
         bool live=!i.reset && !fatal && !i.fatal;
@@ -99,7 +107,9 @@ struct Bench {
             }
         }
     }
+
     void reset() { auto i=input(); i.reset=true; step(i); step(input()); }
+
     unsigned transact(unsigned contenders,bool fast,int request_bit=-1,int response_bit=-1,unsigned id=0) {
         auto i=input(id); i.reserve=contenders;
         if (request_bit>=0) for (unsigned c=0;c<3;++c) if (contenders==(1U<<c)) {
@@ -121,9 +131,11 @@ struct Bench {
         if (request_bit<0 && response_bit<0) ++count["aliased_ids"];
         return c;
     }
+
     Input acquire(unsigned c) {
         auto i=input(); i.reserve=1U<<c; step(i); i.request_valid=2|(1U<<c); i.reserve=7; return i;
     }
+
     void freeze(Input i) {
         require(fatal!=0,"fatal expected");
         i.reserve=7; i.fatal=0; i.response_valid=false; i.request_ready=true; i.response_ready=7;
@@ -134,6 +146,7 @@ struct Bench {
         }
         reset();
     }
+
     void unexpected(unsigned kind) {
         reset(); auto i=input();
         if (kind) i=acquire(kind%3);
@@ -144,6 +157,7 @@ struct Bench {
         i.reserve=7; i.response_valid=true; i.request_ready=kind==2;
         step(i); ++count["unexpected_"+std::to_string(kind)]; freeze(i);
     }
+
     void client_fault(unsigned c,unsigned phase) {
         reset(); auto i=input();
         if (phase) i=acquire(c);
@@ -157,6 +171,7 @@ struct Bench {
         if (phase==2) { i.response_valid=true; i.response_ready=7; }
         step(i); ++count["client_"+std::to_string(c)+"_phase_"+std::to_string(phase)]; freeze(i);
     }
+
     void resets() {
         for (unsigned c=0;c<3;++c) for (unsigned phase=0;phase<3;++phase) {
             reset(); auto i=input();
@@ -167,6 +182,7 @@ struct Bench {
             require(transact(7,true)==0,"reset round-robin priority"); ++count["reset_rr"];
         }
     }
+
     void negative(const std::string& name) {
         reset(); auto i=input();
         if (name=="load-unowned") i.request_valid=3;
@@ -178,6 +194,7 @@ struct Bench {
         drive(i); d.eval(); d.clk_i=1; d.eval(); throw std::runtime_error("caller violation survived");
     }
 };
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

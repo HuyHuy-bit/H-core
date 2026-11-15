@@ -1,7 +1,6 @@
 `default_nettype none
 // eight branch checkpoints: rat snapshots plus younger-allocation history for misprediction recovery.
 module rename_checkpoints (
-  // inputs
   input  wire clk_i, rst_i, flush_i,
   input  wire create_i,
   input  wire [191:0] snapshot_i,
@@ -9,7 +8,6 @@ module rename_checkpoints (
   input  wire resolve_i, mispredict_i,
   input  wire [2:0] resolve_id_i,
 
-  // outputs
   output wire create_ready_o, create_accept_o,
   output wire [2:0] create_id_o,
   output logic restore_valid_o,
@@ -18,6 +16,7 @@ module rename_checkpoints (
   output logic [7:0] released_o,
   output wire [7:0] valid_o
 );
+
   logic [7:0] valid_q, valid_d;
   logic [191:0] snapshot_q [0:7], snapshot_d [0:7];
   logic [63:0] history_q [0:7], history_d [0:7];
@@ -32,7 +31,8 @@ module rename_checkpoints (
       if (!valid_q[slot]) candidate = 3'(slot);
   end
   assign valid_o = valid_q;
-  assign create_ready_o = !rst_i && !flush_i && !recovering && !(&valid_q);
+  // create_i is never raised in a flush or recovery cycle.
+  assign create_ready_o = !rst_i && !(&valid_q);
   assign create_accept_o = create_i && create_ready_o;
   assign create_id_o = create_accept_o ? candidate : 3'd0;
 
@@ -92,7 +92,7 @@ module rename_checkpoints (
     end
   end
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i && !flush_i) begin

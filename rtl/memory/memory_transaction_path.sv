@@ -1,9 +1,6 @@
 `default_nettype none
-// head memory path: load, committed-store and mmio engines behind one data-port arbiter.
-// DCACHE=1: an accepted cached store leaves at once for the store buffer (committed_o pulses with its word);
-// the data port carries only mmio and faulting accesses, which wait until the buffer has drained.
+// ROB-head load/store engines share one data port; DCACHE hands retired cacheable stores to the buffer.
 module memory_transaction_path #(parameter bit DCACHE = 0) (
-  // inputs
   input  wire clk_i, rst_i, recovery_i, kill_i,
   input  wire desc_valid_i,
   input  wire [12:0] id_i,
@@ -22,7 +19,6 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
   input  wire response_valid_i,
   input  memory_protocol_pkg::mem_response_t response_i,
 
-  // outputs
   output wire desc_take_o,
   output wire commit_ready_o,
   output wire commit_accept_o,
@@ -43,7 +39,9 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
   output memory_protocol_pkg::mem_request_t request_o,
   output wire response_ready_o
 );
+
   import memory_protocol_pkg::*;
+
   wire [2:0] engine_busy, engine_fatal, request_valid, request_ready;
   wire [2:0] response_valid, response_ready, reserve, grant;
   mem_request_t [2:0] requests;
@@ -69,7 +67,7 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
   wire occupied = (|engine_busy) || port_busy || fatal_o;
   wire room = active && !occupied && !recovery_i && !kill_i;
   wire cancel = active && kill_i && !irrevocable_o;
-  // a device access must not pass an older retired store still in the store buffer
+  // device accesses wait for older buffered stores to land.
   wire ordered = room && !store_buffer_pending_i;
   wire launch_load = ordered && desc_valid_i && !store_i && load_ready;
   wire launch_mmio = ordered && desc_valid_i && store_i && (uncached_i || fault_i) && mmio_ready;
@@ -77,7 +75,7 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
   wire can_reserve = active && pending_q && head_valid_i && issue_allowed_i && !kill_i && !recovery_i;
   wire result_head = head_valid_i && head_id_i == (load_valid ? load_id : mmio_id);
 
-
+  // engine status, reservations and architectural result routing
   assign fatal_sources_o = rst_i ? 4'd0 : {port_fatal, engine_fatal};
   assign fatal_o = |fatal_sources_o;
   assign fatal_reason_o = rst_i ? 8'd0 : {port_reason, mmio_reason, cs_reason};
@@ -103,8 +101,7 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
   assign cause_o = valid_o ? (load_valid ? load_cause : mmio_cause) : 32'd0;
   assign trap_value_o = valid_o ? (load_valid ? load_trap : mmio_trap) : 32'd0;
 
-  // data-port reservation tracking
-  // pending tracks an ungranted bus reservation; the engines own bus occupancy.
+  // reservation tracking holds ungranted work; engines own bus occupancy.
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       pending_q <= 0;
@@ -162,9 +159,7 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
     .fatal_o(engine_fatal[2]), .fatal_reason_o(mmio_reason)
   );
 
-  // committed-store word view
-  // a committed store touches one word, so the nonzero mask nibble locates it in the line.
-  // DCACHE: the accepted descriptor's word, valid with the committed_o pulse.
+  // committed-store word view comes from the line mask, or the accepted descriptor with DCACHE.
   always_comb begin
     committed_address_o = cs_line_address;
     committed_mask_o = 0;
@@ -191,7 +186,7 @@ module memory_transaction_path #(parameter bit DCACHE = 0) (
     .busy_o(port_busy), .fatal_o(port_fatal), .fatal_reason_o(port_reason), .fatal_clients_o(unused[6:4])
   );
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   wire [3:0] expected_load_mask = fault_i ? 4'd0 :
     ((size_i == 0 ? 4'b0001 : size_i == 1 ? 4'b0011 : 4'b1111) << address_i[1:0]);

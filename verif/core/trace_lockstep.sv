@@ -49,6 +49,7 @@ module trace_lockstep #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SE
   output wire identity_drain_o, fatal_o
 );
   import commit_event_pkg::*;
+
   // the comparison deliberately reads only the hardware-visible bits of each event
   /* verilator lint_off UNUSEDSIGNAL */
   cpu_top #(.FRONTEND_FAULTS(FRONTEND_FAULTS), .TRAP_SERVICE(TRAP_SERVICE), .MEMORY_SERVICE(MEMORY_SERVICE), .EARLY_LOADS(EARLY_LOADS), .TAGE(TAGE), .DCACHE(DCACHE), .ICACHE(ICACHE), .M_EXTENSION(M_EXTENSION), .TRACE(1)) full (.*);
@@ -138,6 +139,7 @@ module trace_lockstep #(parameter bit FRONTEND_FAULTS = 1, parameter bit TRAP_SE
     return a.valid == b.valid && a.retired == b.retired && a.trap == b.trap && a.pc_before == b.pc_before
       && a.pc_after == b.pc_after && a.instruction[19:15] == b.instruction[19:15] && a.instruction[11:0] == b.instruction[11:0];
   endfunction
+
   // trap events: mepc, mcause, mtval, the redirect and the csr writes.
   function automatic logic trap_same(commit_event_t a, commit_event_t b);
     return a.valid == b.valid && a.trap == b.trap && a.pc_before == b.pc_before && a.pc_after == b.pc_after

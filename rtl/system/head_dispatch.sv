@@ -2,6 +2,7 @@
 // dispatch gate for serialized ops: holds the one system (or head-path memory) descriptor until it retires.
 module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
   input  wire clk_i, rst_i, flush_i, drained_i,
+  input  wire hold_i,            // no dispatch: covers every flush and recovery cycle, from registered state
   input  wire [1:0] valid_i, serial_i,
   input  wire cfi0_i, memory_i,
   input  wire [31:0] instruction_i, pc_i,
@@ -15,6 +16,7 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
   input  wire [4:0] recover_slot_i,
   input  wire retire_accept_i,
   input  wire [12:0] retire_id_i,
+
   output wire [1:0] dispatch_valid_o, dispatch_solo_o,
   output wire [1:0] queue_dispatch_o,
   output wire busy_o, owner_valid_o, killed_o,
@@ -23,12 +25,13 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
   output wire [11:0] owner_sources_o,
   output wire owner_memory_o
 );
+
   logic valid_q;
   logic [12:0] id_q;
   logic [31:0] instruction_q, pc_q;
   logic [5:0] source_q, source2_q;
   logic memory_q;
-  wire blocked = rst_i || flush_i || drained_i || recover_i;
+  wire blocked = rst_i || hold_i || drained_i;
   wire younger = 5'(id_q[4:0] - head_id_i[4:0]) > 5'(recover_slot_i - head_id_i[4:0]);
   wire kill = recover_i && younger;
 
@@ -36,7 +39,7 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
   wire capture = allocate_accept_i[0] && serial_i[0] && (HOLD_MEMORY || !memory_i);
   wire release_owner = retire_accept_i && retire_id_i == id_q;
 
-  // Defer serial lane 1; held systems block dispatch, while lane-0 memory may admit younger non-serial work.
+  // dispatch defers serial lane one; held systems block new work while memory may admit younger ordinary work.
   wire open = !valid_q || memory_q;
   assign dispatch_valid_o[0] = valid_i[0] && open && !(valid_q && serial_i[0]) && !blocked;
   assign dispatch_valid_o[1] = dispatch_valid_o[0] && valid_i[1]
@@ -67,6 +70,7 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
       memory_q <= memory_i;
     end
   end
+  // dispatch prefix, descriptor and recovery assertions
 `ifndef SYNTHESIS
   wire load_op = instruction_i[6:0] == 7'h03
       && instruction_i[14:12] inside {3'd0, 3'd1, 3'd2, 3'd4, 3'd5};
@@ -77,6 +81,7 @@ module head_dispatch #(parameter bit HOLD_MEMORY = 1) (
       && instruction_i[14:12] inside {3'd1, 3'd2, 3'd3, 3'd5, 3'd6, 3'd7});
   always_ff @(posedge clk_i) if (!rst_i) begin
     assert (valid_i != 2'b10) else $fatal(1, "HEAD_DISPATCH_PREFIX");
+    assert (!(flush_i || recover_i) || hold_i) else $fatal(1, "HEAD_DISPATCH_HOLD");
     assert ((allocate_accept_i & ~dispatch_valid_o) == 0 && allocate_accept_i != 2'b10)
       else $fatal(1, "HEAD_DISPATCH_ALLOCATION");
     assert (!capture || (!cfi0_i && allocate_accept_i == 1

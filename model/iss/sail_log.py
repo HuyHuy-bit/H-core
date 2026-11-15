@@ -55,6 +55,7 @@ def frames(trace):
     return result
 
 
+# architectural event reconstruction from validated Sail instruction frames
 def parse_sail_log(trace, m=False):
     stream = frames(trace)
     regs = [None]*32; regs[0] = 0

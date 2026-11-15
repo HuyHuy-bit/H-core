@@ -1,6 +1,6 @@
 `default_nettype none
-// random reads and masked writes against an associative-array shadow; reads are checked one cycle later.
-module l1_cache_array_tb #(parameter int CYCLES = 20000);
+// compare registered reads with a shadow; whole-line mode writes every byte and the tag together.
+module l1_cache_array_tb #(parameter int CYCLES = 20000, parameter bit BYTE_WRITE = 1'b1);
   localparam int SETS = 16, WAYS = 2, TAG_BITS = 23;
   logic clk = 0;
   always #5 clk = ~clk;
@@ -12,7 +12,7 @@ module l1_cache_array_tb #(parameter int CYCLES = 20000);
   logic [255:0] write_data = 0;
   wire [WAYS-1:0][TAG_BITS-1:0] read_tag;
   wire [WAYS-1:0][255:0] read_data;
-  l1_cache_array #(.SETS(SETS), .WAYS(WAYS), .TAG_BITS(TAG_BITS)) dut (
+  l1_cache_array #(.SETS(SETS), .WAYS(WAYS), .TAG_BITS(TAG_BITS), .BYTE_WRITE(BYTE_WRITE)) dut (
     .clk_i(clk), .rst_i(rst), .read_set_i(read_set), .write_i(write), .write_tag_i(write_tag),
     .write_set_i(write_set), .write_way_i(write_way), .write_tag_value_i(write_tag_value),
     .write_byte_mask_i(write_mask), .write_data_i(write_data), .read_tag_o(read_tag), .read_data_o(read_data));
@@ -32,6 +32,7 @@ module l1_cache_array_tb #(parameter int CYCLES = 20000);
   logic [WAYS-1:0][255:0] exp_data, data_mask;
   logic check_pending = 0;
 
+  // drive array traffic and compare the preceding registered read with written shadow bytes.
   task automatic cycle(input bit do_read, input bit do_write, input int rset, input int wset);
     int k;
     logic [255:0] cur, known;
@@ -39,9 +40,9 @@ module l1_cache_array_tb #(parameter int CYCLES = 20000);
     write = do_write;
     write_set = 4'(wset);
     write_way = 1'($urandom);
-    write_tag = 1'($urandom);
+    write_tag = BYTE_WRITE ? 1'($urandom) : 1'b1;
     write_tag_value = TAG_BITS'($urandom);
-    write_mask = ($urandom_range(3) == 0) ? 32'hffffffff : 32'($urandom);
+    write_mask = (!BYTE_WRITE || $urandom_range(3) == 0) ? 32'hffffffff : 32'($urandom);
     write_data = {$urandom, $urandom, $urandom, $urandom, $urandom, $urandom, $urandom, $urandom};
     check_pending = 0;
     if (do_read) begin

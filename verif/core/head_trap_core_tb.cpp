@@ -6,12 +6,15 @@ static void handler(Bench& b,bool dependencies=false) {
     b.memory[66]=instruction(21,0,0,0,0x1000-0x108);
     b.memory[0x1000/4]=0x0000000f;
 }
+
 static void init(Bench& b) {
     b.memory.fill(instruction(2,0,0,0,0));
     for (unsigned n=0;n<31;n++) b.memory[n]=instruction(2,n+1,0,0,n*11+5);
     handler(b,true);
 }
+
 static void restart(Bench& b,uint32_t pc) { Input i; i.flush=true; i.target=pc; b.tick(i); }
+
 static void offer(Bench& b,std::mt19937& rng) {
     for (unsigned n=0;n<3000;n++) {
         Input i; i.execute=rng()%4; i.complete=rng()%4; i.retire=rng()%4;
@@ -21,12 +24,14 @@ static void offer(Bench& b,std::mt19937& rng) {
     }
     b.require(false,"trap preparation watchdog");
 }
+
 static void accept(Bench& b) {
     const unsigned before=b.traps;
     Input i; i.trap_ready=true; i.grant=false; i.complete=0; b.tick(i);
     b.require(b.traps==before+1,"trap acceptance lost");
     b.require(b.d.occupancy_o==0 && b.d.producer_busy_o==0,"trap did not clear backend/producers");
 }
+
 static void drain(Bench& b) {
     Input i; i.enable=false; i.flush=true; i.target=0x1000; b.tick(i);
     for (unsigned n=0;n<100 && (b.pending || b.held || b.d.fetch_busy_o);n++) {
@@ -34,6 +39,7 @@ static void drain(Bench& b) {
     }
     i.flush=false; i.drain=true; b.tick(i);
 }
+
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {
@@ -72,12 +78,12 @@ int main(int argc,char** argv) {
             b.reset(); offer(b,rng); accept(b); b.run_to(0x1000,rng);
             b.coverage["target_fault_"+std::to_string(op)]++;
         }
-        // A waiting head fault outranks younger branch resolution and kills both holders.
+        // A waiting head fault outranks younger branch resolution and kills its holder; it also holds younger launches.
         b.memory.fill(instruction(2,2,0,0,1)); b.memory[0]=0xffffffff;
         b.memory[1]=instruction(27,1,0,0,0x200-4); handler(b); b.reset();
         offer(b,rng);
         for (unsigned n=0;n<30;n++) { Input i; i.complete=0; b.tick(i); }
-        b.require(b.d.producer_busy_o==3,"younger producers not held");
+        b.require(b.d.producer_busy_o&1,"younger branch holder not held");
         accept(b); b.run_to(0x1000,rng); b.coverage["trap_over_younger_branch"]++;
         // Trap redirect must preserve an offered request and drain an accepted stale response.
         for (unsigned kind=0;kind<2;kind++) {

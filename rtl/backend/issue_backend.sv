@@ -1,7 +1,6 @@
 `default_nettype none
 // rename_rob plus the 16-entry issue queue: renamed instructions wait here for operands and a port.
 module issue_backend #(parameter bit TRACE = 1) (
-  // inputs
   input  wire clk_i, rst_i, flush_i, drained_i,
   input  wire resources_ready_i,
   input  wire [1:0] valid_i, cfi_i, solo_i, queue_skip_i,
@@ -12,6 +11,9 @@ module issue_backend #(parameter bit TRACE = 1) (
   input  wire head_read_i,
   input  wire [11:0] head_source_i,
   input  wire [1:0] port_ready_i,
+  input  wire [5:0] early_valid_i,
+  input  wire [35:0] early_destination_i,
+  input  wire [3:0] read_early_i,
   input  wire [1:0] complete_offer_i, complete_solo_i,
   input  wire [25:0] complete_id_i,
   input  commit_event_pkg::commit_event_t [1:0] complete_event_i,
@@ -22,8 +24,8 @@ module issue_backend #(parameter bit TRACE = 1) (
   input  wire [12:0] serial_id_i,
   input  commit_event_pkg::commit_event_t serial_event_i,
   input  wire trap_ready_i,
+  input  wire recover_hold_i,
 
-  // outputs
   output wire [1:0] allocate_accept_o,
   output wire [25:0] allocate_id_o,
   output wire [11:0] source1_o, source2_o, destination_o, stale_o,
@@ -35,6 +37,8 @@ module issue_backend #(parameter bit TRACE = 1) (
   output wire [127:0] issue_payload_o,
   output wire [127:0] read_data_o,
   output wire [3:0] read_ready_o,
+  output wire [63:0] head_data_o,
+  output wire [1:0] head_ready_o,
   output wire [1:0] complete_accept_o, wb_accept_o,
   output wire [11:0] wb_destination_o,
   output wire [63:0] wb_data_o,
@@ -60,12 +64,14 @@ module issue_backend #(parameter bit TRACE = 1) (
   // checkpoints of the cfi issuing on port 0 and of the resolving cfi
   output wire [2:0] issue_checkpoint_o, resolve_checkpoint_o
 );
+
   wire [1:0] dispatch_ready;
+  // dedicated head read ports leave issue reads independent.
+  wire unused_head_read = head_read_i;
   wire unused_serial_ready;
-  wire [23:0] read_address = head_read_i ? {12'd0, head_source_i} : issue_source_o;
   wire recover = flush_i || trap_accept_o;
 
-  // the queue must hold the whole renamed prefix, so its credits join the allocation stall.
+  // queue credits must cover the entire renamed prefix.
   wire [1:0] selected = {valid_i[1] && !cfi_i[0], valid_i[0]};
 
   // rename, register storage and retirement
@@ -82,33 +88,44 @@ module issue_backend #(parameter bit TRACE = 1) (
     .retire_ready_i, .retire_valid_o, .retire_accept_o, .retire_rd_o,
     .retire_destination_o, .retire_stale_o, .retire_event_o,
     .serial_offer_i, .serial_id_i, .serial_event_i, .serial_ready_o(unused_serial_ready), .serial_accept_o,
-    .trap_ready_i, .trap_valid_o, .trap_accept_o, .trap_event_o,
-    .read_address_i(read_address), .read_data_o, .read_ready_o,
+    .trap_ready_i, .recover_hold_i, .trap_valid_o, .trap_accept_o, .trap_event_o,
+    .read_address_i(issue_source_o), .read_data_o, .read_ready_o,
+    .head_address_i(head_source_i), .head_data_o, .head_ready_o,
     .head_valid_o, .head_id_o, .head_pc_o, .occupancy_o, .identity_drain_o,
     .rat_o, .committed_o, .free_o, .ready_o,
     .checkpoint_accept_o, .checkpoint_id_o, .checkpoint_valid_o, .checkpoint_released_o,
     .lookup_slot_i(issue_id_o[4:0]), .lookup_checkpoint_o(issue_checkpoint_o), .resolve_checkpoint_o
   );
 
+  // registered wakeup follows accepted writeback; register data is ready before consumers issue.
+  logic [1:0] wake_q;
+  logic [11:0] wake_destination_q;
+  always_ff @(posedge clk_i) begin
+    wake_q <= rst_i ? 2'b00 : wb_accept_o;
+    wake_destination_q <= wb_destination_o;
+  end
+
   // operand wakeup and issue scheduling
   issue_queue queue (
     .clk_i, .rst_i, .flush_i(recover), .recover_i(branch_recover_o),
+    .hold_i(flush_i || trap_valid_o || recover_hold_i),
     .head_slot_i(head_id_o[4:0]), .recover_slot_i(resolve_id_i[4:0]),
     .dispatch_i(allocate_accept_o & ~queue_skip_i), .dispatch_ready_o(dispatch_ready), .dispatch_id_i(allocate_id_o),
     .dispatch_source_i({source2_o[11:6], source1_o[11:6], source2_o[5:0], source1_o[5:0]}),
     .dispatch_ready_i(source_ready_o), .dispatch_eligible_i(eligible_i),
     .dispatch_destination_i(destination_o), .dispatch_payload_i(payload_i),
-    .wb_accept_i(wb_accept_o), .wb_destination_i(wb_destination_o),
-    .port_ready_i(port_ready_i & {2{!head_read_i}}), .issue_o, .issue_id_o, .read_address_o(issue_source_o),
-    .issue_destination_o, .issue_payload_o, .occupancy_o(issue_occupancy_o)
+    .wb_accept_i(wake_q), .wb_destination_i(wake_destination_q),
+    .port_ready_i, .issue_o, .issue_id_o, .read_address_o(issue_source_o),
+    .issue_destination_o, .issue_payload_o, .occupancy_o(issue_occupancy_o),
+    .early_valid_i, .early_destination_i
   );
 
-  // checks
+  // assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin
       for (int port_id = 0; port_id < 2; port_id++)
-        assert (!issue_o[port_id] || &read_ready_o[port_id*2 +: 2])
+        assert (!issue_o[port_id] || &(read_ready_o[port_id*2 +: 2] | read_early_i[port_id*2 +: 2]))
           else $fatal(1, "ISSUE_BACKEND_READ");
       assert (!drained_i || issue_occupancy_o == 0) else $fatal(1, "ISSUE_BACKEND_DRAIN");
     end

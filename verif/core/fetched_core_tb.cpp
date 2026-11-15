@@ -1,10 +1,4 @@
-// Runs a raw program image on the fetched memory core and prints accepted architectural events.
-// With a tohost address (ACT4), the run ends once the committed stores make tohost == 1 and every write drains; the count is a limit.
-// Cacheable stores are checked on the core's committed-store stream: in retirement order, applied to a shadow memory
-// that every external line write must agree with.
-// Mode perf holds every external readiness high, answers after fixed latencies and ends at a terminal PC;
-// +read_latency=N +write_latency=N +terminal=PC [+warm=PC:n:PC:n]. The count is a limit.
-// Perf mode also prints COUNTER <all|region> <name> <value> lines (docs: perf-counters).
+// run raw images and check accepted architectural events, committed stores and external memory traffic.
 #include "Vcpu_top.h"
 #include "Vcpu_top___024root.h"
 #include "verilated.h"
@@ -35,16 +29,17 @@ static void require(bool ok, const std::string& message) {
 #ifndef TB_REFILL_FAULT
 #define TB_REFILL_FAULT 0
 #endif
+
 struct Transaction {
     bool pending=false, write=false, uncached=false, fault=false;
     unsigned delay=0, id=0, address=0, mask=0, size=0;
     std::array<uint32_t,8> words{};
 };
+
 struct Write { unsigned address, mask; uint32_t data; };
 constexpr unsigned SLOT_WORDS=(EVENT_BITS+31)/32;
 
-// Verification-only activity counters (docs: perf-counters), sampled before each perf edge.
-// They read Verilator internals; TB_<parameter> defines from the build select the profile's hierarchy.
+// verification counters sample Verilator internals before each perf edge using the selected TB hierarchy.
 #ifdef TB_LOCKSTEP
 #define CORE(name) dut.rootp->trace_lockstep__DOT__full__DOT__##name
 #else
@@ -56,6 +51,7 @@ constexpr unsigned SLOT_WORDS=(EVENT_BITS+31)/32;
 #ifdef TB_ATTRIBUTION
 #include "perf_attribution_sample.hpp"
 #endif
+
 static const char* kind(uint32_t word) {
     const unsigned rd=(word>>7)&31, rs1=(word>>15)&31;
     switch (word&127) {
@@ -68,6 +64,7 @@ static const char* kind(uint32_t word) {
     default: return "alu";
     }
 }
+
 static void sample(Vcpu_top& dut,const std::vector<uint8_t>& memory,std::map<std::string,uint64_t>& c) {
     auto word=[&](uint32_t pc) { uint32_t w=0; for (unsigned n=0;n<4;++n) w|=pc+n<memory.size() ? uint32_t(memory[pc+n])<<(8*n):0; return w; };
     auto ones=[](unsigned bits) { return std::to_string((bits&1)+(bits>>1&1)); };
@@ -108,7 +105,7 @@ static void sample(Vcpu_top& dut,const std::vector<uint8_t>& memory,std::map<std
 #endif
     c["tage_train_drop"]+=CORE(frontend__DOT__prediction__DOT__predictor__DOT__train_drop);
 #if TB_ICACHE
-#define ICACHE(name) CORE(frontend__DOT__icache__DOT__cache__DOT__##name)
+#define ICACHE(name) CORE(frontend__DOT__cached__DOT__cache__DOT__##name)
     // Lookups count wrong-path ones too; a prefetch counts the line checks the cache accepts.
     c["icache_hit"]+=ICACHE(hit_valid_o);
     c["icache_miss"]+=ICACHE(miss_o);
@@ -119,10 +116,11 @@ static void sample(Vcpu_top& dut,const std::vector<uint8_t>& memory,std::map<std
     // abandoned demands: a newer miss replaces one before delivery, or its fill arrives after fetch moved on
     c["icache_demand_replaced"]+=ICACHE(demand_miss) && ICACHE(demand_valid_q) && !ICACHE(deliver)
         && ICACHE(demand_line_q)!=ICACHE(stage_line_q);
-    c["icache_fill_unused"]+=(ICACHE(fill_valid_o) || ICACHE(fill_fault_o)) && !CORE(frontend__DOT__fill_take);
+    c["icache_fill_unused"]+=(ICACHE(fill_valid_o) || ICACHE(fill_fault_o)) && !CORE(frontend__DOT__cached__DOT__fill);
 #endif
 }
 
+// raw, ACT4 and fixed-latency perf modes share the checked memory target.
 int main(int argc,char** argv) {
     Verilated::commandArgs(argc,argv);
     try {

@@ -8,6 +8,7 @@ module csr_unit #(parameter bit M_EXTENSION = 0) (
   input  wire trap_i,
   input  wire [31:0] cause_i, trap_value_i,
   input  wire response_ready_i,
+
   output wire request_ready_o,
   output wire response_valid_o,
   output wire accept_o, retired_o, trap_accept_o,
@@ -16,9 +17,11 @@ module csr_unit #(parameter bit M_EXTENSION = 0) (
   output commit_event_pkg::commit_csr_effect_t [3:0] effects_o,
   output wire [31:0] mtvec_o, mepc_o
 );
+
   import platform_pkg::*;
   import core_pkg::*;
   import commit_event_pkg::*;
+
   logic [31:0] csr_q [CSR_COUNT];
   decoded_t decoded;
   logic pending_q, legal_q, read_q, trap_q;
@@ -35,6 +38,7 @@ module csr_unit #(parameter bit M_EXTENSION = 0) (
     return M_EXTENSION && index == CSR_INDEX_MISA ? 32'h00001000 : 32'd0;
   endfunction
 
+  // request decoding and held response view
   decoder decode (.instruction_i, .decoded_o(decoded));
   assign request_ready_o = !rst_i && !cancel_i && !pending_q;
   assign response_valid_o = !rst_i && !cancel_i && pending_q;
@@ -114,6 +118,13 @@ module csr_unit #(parameter bit M_EXTENSION = 0) (
     end
   end
 
+  // retirement counters precompute increments before the late count selects a sum.
+  wire [63:0] instret = {csr_q[CSR_INDEX_MINSTRETH], csr_q[CSR_INDEX_MINSTRET]};
+  wire [63:0] instret_sum [4];
+  for (genvar step = 0; step < 4; step++) begin : instret_step
+    assign instret_sum[step] = instret + 64'(step);
+  end
+
   // explicit counter-write detection
   always_comb begin
     cycle_write = 0;
@@ -143,10 +154,10 @@ module csr_unit #(parameter bit M_EXTENSION = 0) (
       if (!csr_q[CSR_INDEX_MCOUNTINHIBIT][0] && !cycle_write)
         {csr_q[CSR_INDEX_MCYCLEH], csr_q[CSR_INDEX_MCYCLE]} <= {csr_q[CSR_INDEX_MCYCLEH], csr_q[CSR_INDEX_MCYCLE]} + 64'd1;
       if (!csr_q[CSR_INDEX_MCOUNTINHIBIT][2] && !instret_write)
-        {csr_q[CSR_INDEX_MINSTRETH], csr_q[CSR_INDEX_MINSTRET]} <= {csr_q[CSR_INDEX_MINSTRETH], csr_q[CSR_INDEX_MINSTRET]} + 64'(increment);
+        {csr_q[CSR_INDEX_MINSTRETH], csr_q[CSR_INDEX_MINSTRET]} <= instret_sum[increment];
       for (int e = 0; e < 4; e++) begin
         for (int i = 0; i < CSR_COUNT; i++) begin
-          // the static mask is redundant (effects never exceed it) but lets synthesis drop constant bits
+          // static CSR masks expose constant bits to synthesis.
           if (commit_state && effects_q[e].valid && effects_q[e].write_mask != 0 && effects_q[e].address == CSR_ADDRESSES[i])
             csr_q[i] <= (csr_q[i] & ~(effects_q[e].write_mask & CSR_WRITE_MASKS[i]))
               | (effects_q[e].new_value & effects_q[e].write_mask & CSR_WRITE_MASKS[i]);
@@ -154,6 +165,7 @@ module csr_unit #(parameter bit M_EXTENSION = 0) (
       end
     end
   end
+  // CSR serialization and effect-mask assertions
 `ifndef SYNTHESIS
   always_ff @(posedge clk_i) begin
     if (!rst_i) begin

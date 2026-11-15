@@ -10,9 +10,12 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
   input  wire [LOOKUPS-1:0] lookup_branch_i, lookup_path_i,
   input  wire [UPDATES-1:0] update_valid_i, update_taken_i,
   input  wire [UPDATES*32-1:0] update_pc_i, update_history_i,  // history before the branch; TRAIN_QUEUE only
+
   output logic [LOOKUPS-1:0] lookup_taken_o,
   output logic [1:0] update_dropped_o
 );
+
+  // prediction, hashing and training types
   typedef struct packed {
     logic valid;
     logic [7:0] tag;
@@ -35,6 +38,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     logic [1:0] useful;
   } lookup_t;
 
+  // base and tagged tables with history, chooser and aging state
   logic [255:0][1:0] base_q, base_n;
   entry_t [3:0][63:0] table_q, table_n;
   logic [31:0] history_q, history_n;
@@ -48,6 +52,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     for (int i = 0; i < 32; i += width) r ^= x[i +: 8] & 8'((1 << width) - 1);
     return r;
   endfunction
+
   function automatic int saturate(input int value, input logic up, input int low, high);
     return up ? (value < high ? value + 1 : high) : (value > low ? value - 1 : low);
   endfunction
@@ -63,7 +68,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     return r;
   endfunction
 
-  // Choose the longest tag hit, then the next longest or base as alternate; e[b] is the indexed bank entry.
+  // provider selection uses the longest tag hit, with the next longest hit or base as alternate.
   function automatic lookup_t probe(input logic [3:0][7:0] tag, input logic base_taken, input entry_t [3:0] e,
                                     input logic alternate_weak);
     lookup_t r = '0;
@@ -87,6 +92,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     end
     return r;
   endfunction
+
   function automatic lookup_t lookup(input logic [17:2] pc, input logic [31:0] history,
       input logic [255:0][1:0] base, input entry_t [3:0][63:0] banks, input logic alternate_weak);
     automatic hash_t k = hash_of(pc, history);
@@ -95,6 +101,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     return probe(k.tag, base[k.base_index][1], e, alternate_weak);
   endfunction
 
+  // speculative direction lookup
   always_comb begin
     automatic logic [31:0] h = EXTERNAL_HISTORY ? lookup_history_i : history_q;
     for (int lane = 0; lane < LOOKUPS; lane++) begin
@@ -115,7 +122,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     wire unused = ^update_history_i;
   end
 
-  // Train one queued entry per cycle; the four-entry queue drops youngest arrivals when full.
+  // retirement training queue drains one entry per cycle and drops youngest overflow arrivals.
   localparam int DEPTH = 4;
   train_t head;
   logic head_valid;
@@ -155,7 +162,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     assign update_dropped_o = 0;
   end
 
-  // Update only indexed entries; later steps read through earlier writes and aging in model order.
+  // ordered training forwards earlier indexed writes and aging into later update steps.
   localparam int STEPS = TRAIN_QUEUE ? 1 : UPDATES;
   always_comb begin
     automatic logic [STEPS-1:0] step_valid, step_aging;
@@ -219,7 +226,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
       step_entry[step] = e;
       step_base[step] = base;
     end
-    // a valid step writes back all four indexed entries, so write enables come from flops, not from the probe
+    // indexed writeback uses registered step validity for all four banks.
     base_n = base_q;
     table_n = table_q;
     for (int step = 0; step < STEPS; step++) begin
@@ -232,6 +239,7 @@ module tage_predictor #(parameter int AGE_BITS = 18, parameter int LOOKUPS = 1, 
     end
   end
 
+  // table, history and aging storage
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
       base_q <= {256{2'b01}};

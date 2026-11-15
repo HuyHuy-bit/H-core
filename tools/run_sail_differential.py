@@ -412,12 +412,19 @@ def main():
     mutations += negatives
     for name,file,old,new in ([
         ('fence_i_no_redirect','rtl/system/head_system_controller.sv','decoded.op inside {OP_MRET, OP_FENCE_I};','decoded.op == OP_MRET;'),
-        ('fence_i_keeps_line','rtl/frontend/fetch_unit.sv','        end else state_q <= EMPTY;',
-         '        end else if (redirect_pc_i[31:5] != pc_q[31:5]) state_q <= EMPTY;'),
+        # the cached fetch holds several lines, the uncached one a single buffer: the same fault in each
+        ('fence_i_keeps_line','rtl/frontend/fetch_unit.sv',*((
+            "if (!(PREDICT && repair_i)) valid_q <= '0;",
+            "if (!(PREDICT && repair_i)) for (int n = 0; n < LINES; n++) if (line_q[n] != redirect_pc_i[31:5]) valid_q[n] <= 0;",
+        ) if config['parameters'].get('ICACHE') else (
+            '        end else state_q <= EMPTY;',
+            '        end else if (redirect_pc_i[31:5] != pc_q[31:5]) state_q <= EMPTY;'))),
     ] + ([
         # Detect stale early loads and recovery that strands an already-issued surviving load.
         ('early_ignores_overlap','rtl/memory/load_store_unit.sv','start_ready && forward_mask == 0;','start_ready;'),
         ('early_kills_survivor','rtl/memory/load_store_unit.sv',"(recover_i && 5'(slot - head) > 5'(recover_slot_i - head))",'recover_i'),
+        # A load in the execute stage must not wake its consumers at issue: its result comes from memory.
+        ('early_wakes_on_load','rtl/backend/execution_backend.sv','|| !(issue_payload[70:64] inside',"|| 1'b1 || !(issue_payload[70:64] inside"),
     ] if 'rtl/memory/load_store_unit.sv' in config['sources'] else []) + ([
         # Fence.i: without the cache clean, fetch reads stale code.
         ('fence_i_skips_clean','rtl/system/head_system_controller.sv','clean_q <= CLEAN_PULSE;','clean_q <= CLEAN_DONE;'),
@@ -437,7 +444,7 @@ def main():
         # Detect RV32M routing, busy, opcode, recovery, misa and fetch-decode faults.
         ('m_on_port0','rtl/backend/execution_backend.sv',"EARLY_LOADS && memory_op[lane] || muldiv_op[lane] ? 2'b10","EARLY_LOADS && memory_op[lane] ? 2'b10"),
         ('m_ready_ignored','rtl/backend/execution_backend.sv','assign producer_ready[1] = alu1_ready && muldiv_ready;','assign producer_ready[1] = alu1_ready;'),
-        ('m_issue_any_op','rtl/backend/execution_backend.sv',"issue_payload[70:64] == 7'h33 && issue_payload[95:89] == 7'h01;","issue_payload[70:64] == 7'h33;"),
+        ('m_issue_any_op','rtl/backend/execution_backend.sv',"stage_payload_q[1][6:0] == 7'h33 && stage_payload_q[1][31:25] == 7'h01;","stage_payload_q[1][6:0] == 7'h33;"),
         ('m_recover_by_head','rtl/backend/execution_backend.sv','.recover_slot_i(resolve_id_o[4:0]), .head_slot_i(head_id_o[4:0]),',
          '.recover_slot_i(head_id_o[4:0]), .head_slot_i(head_id_o[4:0]),'),
         ('misa_without_m','rtl/system/csr_unit.sv',"? 32'h00001000 : 32'd0;","? 32'd0 : 32'd0;"),
