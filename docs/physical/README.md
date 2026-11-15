@@ -25,8 +25,8 @@ corner.
 | Routing DRC (detailed router) | 0 |
 | Antenna violations | 800 nets, 1,110 pins |
 | IR drop, typical | 1.38 mV VPWR, 1.19 mV VGND (0.08 %) |
-| Magic DRC, KLayout DRC, LVS, XOR | running, started 2026-11-15 |
-| Gate-level CoreMark | running, started 2026-11-15 |
+| Magic DRC, KLayout DRC, LVS, XOR | not run |
+| Gate-level CoreMark | not completed |
 
 ## Layout gallery
 
@@ -57,7 +57,7 @@ flip-flop arrays (no SRAM macros). The cache arrays are clocked through
 |---|---|
 | CoreMark, RTL (2 iterations, RV32IM, memory latency 1) | 633,494 cycles, 647,465 instructions retired, exit 0 |
 | CoreMark, RTL `chip_top` on the gate-level bench | last memory request at cycle 633,492 |
-| CoreMark, routed gate-level netlist | running |
+| CoreMark, routed gate-level netlist | not completed (netlist build stopped) |
 
 The gate-level run compares the routed netlist with the RTL, cycle by cycle,
 at the memory ports. Command: `verif/gls/run_gls.sh rtl|gates OUT`. It is
@@ -140,8 +140,9 @@ names come from the flops' `Q` nets in `route_fin/final/nl/chip_top.nl.v`.
 - 800 antenna nets remain.
 - Max slew and max capacitance violations: 10,571 and 3,315 typical;
   104,679 and 8,876 in the worst corner.
-- Sign-off DRC, LVS and XOR were not run before the GDS was written; they
-  are running now.
+- Sign-off DRC, LVS and XOR were not run.
+- The gate-level CoreMark run was stopped while the netlist compiled; the
+  bench is ready in `verif/gls/`.
 - IR drop used OpenROAD's default supply points (no pad locations given) and
   vectorless power, so it is optimistic.
 - Power is vectorless, not sign-off power.
@@ -150,7 +151,8 @@ names come from the flops' `Q` nets in `route_fin/final/nl/chip_top.nl.v`.
   the local, untracked `out/` directory.
 
 Next: the pipeline register on the wake-up path, post-route repair and
-input hold constraints, then a re-route.
+input hold constraints, a re-route, then sign-off DRC, LVS and the gate-level
+run.
 
 ## Reproducing the run
 
@@ -171,7 +173,7 @@ previous tag's state:
 | `route_drt` | `OpenROAD.DetailedRouting` → `OpenROAD.STAPostPNR` |
 | `route_fin` | `Odb.RemoveRoutingObstructions` → `OpenROAD.STAPostPNR` |
 | `gds` | `Magic.StreamOut` → `KLayout.StreamOut` |
-| `so_*` | IR drop, XOR, KLayout DRC, LVS, Magic DRC |
+| `so_irdrop` | `OpenROAD.IRDropReport` |
 
 A typical call:
 
@@ -208,4 +210,4 @@ which is not committed. `STA` = `physical/runs/route_fin/11-openroad-stapostpnr`
 | Tool versions | `receipt.json` → `tool_versions`; Magic from `physical/runs/gds/01-magic-streamout` log |
 | Detailed-routing time | `route/progress.txt` |
 | CoreMark, RTL | `out/best_model_rtl_2026-11-13/step17.log:1–2` |
-| CoreMark, gate-level bench | `out/gls_2026-11-15/{rtl,gates}/sim.log` |
+| CoreMark, gate-level bench (RTL side) | `out/gls_2026-11-15/rtl/sim.log` |

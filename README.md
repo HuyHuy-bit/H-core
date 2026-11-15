@@ -72,7 +72,7 @@ See the [architecture guide](docs/architecture/README.md) for design choices.
 | Architectural comparison | Sail and Spike compare retired instructions against the RTL; selected ACT4 tests |
 | Formal verification | SymbiYosys bounded memory checks, forwarding proofs, rename induction |
 | Mutation testing | deliberate RTL faults must be caught by the tests and proofs |
-| Gate-level simulation | the routed netlist runs CoreMark against the RTL, cycle by cycle |
+| Gate-level simulation | a bench (`verif/gls/`) runs CoreMark on the RTL and the routed netlist and compares them cycle by cycle |
 
 | Result | Status |
 |---|---|
@@ -81,7 +81,7 @@ See the [architecture guide](docs/architecture/README.md) for design choices.
 | Store forwarding | combinational selector proofs pass |
 | Rename ownership | inductive safety proof passes (up to four in-flight instructions) |
 | CoreMark, RTL | 633,494 cycles, 647,465 instructions retired, exit 0 |
-| CoreMark, routed netlist vs RTL | running |
+| CoreMark, routed netlist vs RTL | not completed (bench ready; netlist build stopped) |
 
 Checked whole-core execution:
 
@@ -115,7 +115,7 @@ its 15 ns target.
 | Power (vectorless) | 0.182 W typical |
 | Routing DRC / antenna nets | 0 / 800 |
 | IR drop, typical | 1.38 mV (0.08 %) |
-| Magic DRC, KLayout DRC, LVS, XOR | running |
+| Magic DRC, KLayout DRC, LVS, XOR | not run |
 
 The worst setup path runs from load/store completion through the issue queue
 and the register file into operand capture. Its 61 cells take 23.3 ns of cell
@@ -142,6 +142,7 @@ trade-offs, reproduction steps and the evidence index.
   post-route repair, and balance the cache clock gates (2.27 ns skew).
 - **Clean up the layout.** Repair the 800 antenna nets and the max slew and
   capacitance violations, then re-route and rerun sign-off.
-- **Close verification.** Refresh full regression and add a timing-annotated
-  gate-level simulation.
+- **Close verification.** Run sign-off DRC and LVS, finish the gate-level
+  CoreMark run, refresh full regression, and add a timing-annotated gate-level
+  simulation.
 - **Multicore.** Build on this core toward a multicore design.
