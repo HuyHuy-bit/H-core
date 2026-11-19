@@ -62,6 +62,14 @@ def main() -> None:
         "FP_SIZING": "relative",
         "FP_CORE_UTIL": 45,
         "PL_TARGET_DENSITY_PCT": 55,
+        "IO_PIN_ORDER_CFG": str(ROOT / "config/chip_pin_order.cfg"),
+        "ERRORS_ON_UNMATCHED_IO": "both",
+
+        # Repeat electrical and timing repair with global-route parasitics.
+        "RUN_POST_GRT_DESIGN_REPAIR": True,
+        "RUN_POST_GRT_RESIZER_TIMING": True,
+        "GRT_ALLOW_CONGESTION": True,
+        "RUN_HEURISTIC_DIODE_INSERTION": True,
         "DRT_THREADS": args.threads,
     }
     (OUT / "config.json").write_text(json.dumps(config, indent=2) + "\n")

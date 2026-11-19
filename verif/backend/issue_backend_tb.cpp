@@ -148,7 +148,7 @@ public:
         const unsigned cp = checkpoints(); unsigned released = 0;
         for (auto b : branches)
             if ((resolve && !mispredict && b.id == resolve_id) || (recovery && (b.id == resolve_id || locate(b.id) > ri))) released |= 1U << b.slot;
-        auto speculative = map(); auto available = free(); auto readiness = ready();
+        auto speculative = map(); auto available = free();
         const unsigned rv = active && !recover_hold ? (1U << retirable())-1 : 0;
         unsigned retire = rv & in.retire_ready; if (!(retire&1)) retire = 0;
         unsigned complete = 0, wb = 0; uint64_t reclaim = 0;
@@ -161,7 +161,6 @@ public:
                 complete |= 1U << lane;
                 if (queue[i].rd && !bit(c.event, TRAP_OFFSET)) {
                     wb |= 1U << lane; wb_tag[lane] = queue[i].destination;
-                    readiness |= UINT64_C(1) << queue[i].destination;
                 }
             }
         }
@@ -296,13 +295,8 @@ public:
             require(launched == (issued ? expected.payload : 0), "issue payload");
             for (unsigned operand = 0; operand < 2; ++operand) {
                 const unsigned p = issued ? expected.source[operand] : 0, index = port*2+operand;
-                uint32_t value = payload[p]; bool defined = known[p];
-                for (unsigned lane = 0; lane < 2; ++lane) if ((wb & (1U << lane)) && wb_tag[lane] == p) {
-                    // an entry is woken a cycle after the write, so no issue reads through this bypass here.
-                    value = unsigned(get(in.complete[lane].event, RD_VALUE_OFFSET, 32)); defined = true;
-                }
-                if (defined) require(get(dut.read_data_o, index*32, 32) == value, "PRF payload");
-                require(((dut.read_ready_o >> index)&1) == (active && !trap && ((readiness & ~reclaim) >> p & 1)), "PRF readiness");
+                if (known[p]) require(get(dut.read_data_o, index*32, 32) == payload[p], "PRF payload");
+                require(((dut.read_ready_o >> index)&1) == (active && !trap && ((ready() & ~reclaim) >> p & 1)), "PRF readiness");
             }
         }
         // head ports have no writeback bypass: a register written this cycle reads stale and not ready.

@@ -4,11 +4,11 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   parameter bit EARLY_LOADS = 0, parameter bit TRACE = 1, parameter int CHECKPOINT_BITS = 12, parameter bit M_EXTENSION = 0) (
   input  wire clk_i, rst_i, flush_i, drained_i,
   input  wire [1:0] valid_i,
-  input  wire [63:0] instruction_i, pc_i, predicted_pc_i,
+  input  wire [1:0][31:0] instruction_i, pc_i, predicted_pc_i,
   input  wire [1:0] predicted_taken_i,
   input  wire [2*CHECKPOINT_BITS-1:0] predicted_checkpoint_i,
   input  wire [1:0] frontend_fault_i,
-  input  wire [63:0] frontend_cause_i, frontend_value_i,
+  input  wire [1:0][31:0] frontend_cause_i, frontend_value_i,
   input  wire [1:0] execution_ready_i, completion_enable_i, retire_ready_i,
   input  wire resolve_grant_i,
   input  wire trap_ready_i,
@@ -20,16 +20,16 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   input  memory_protocol_pkg::mem_response_t data_response_i,
 
   output wire [1:0] supported_o, allocate_accept_o,
-  output wire [25:0] allocate_id_o,
+  output wire [1:0][12:0] allocate_id_o,
   output wire [CHECKPOINT_BITS-1:0] redirect_checkpoint_o,
   output wire resolve_valid_o, resolve_accept_o, resolve_taken_o, resolve_mispredict_o,
   output wire [12:0] resolve_id_o,
   output wire [31:0] resolve_pc_o,
   output wire redirect_o,
   output wire [1:0] issue_o, producer_busy_o,
-  output wire [25:0] issue_id_o,
+  output wire [1:0][12:0] issue_id_o,
   output wire [1:0] completion_valid_o, completion_accept_o, wb_accept_o,
-  output wire [25:0] completion_id_o,
+  output wire [1:0][12:0] completion_id_o,
   output commit_event_pkg::commit_event_t [1:0] completion_event_o,
   output wire [1:0] retire_valid_o, retire_accept_o,
   output commit_event_pkg::commit_event_t [1:0] retire_event_o,
@@ -64,7 +64,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
 
   // decode and dispatch signals
   decoded_t [1:0] decoded;
-  wire [9:0] rs1, rs2, rd;
+  wire [1:0][4:0] rs1, rs2, rd;
   wire [1:0] cfi, selected, producer_ready, system_op, memory_op, serial_op, admitted, dispatch_solo, muldiv_op;
   wire [5:0] rename_source, rename_source2, unused_rename_source, unused_rename_source2;
   wire [3:0] unused_read_ready;
@@ -94,7 +94,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   assign raw_event = memory_fault_offer ? memory_fault_event : illegal_event;
   assign serial_op = system_op | memory_op;
   wire [1:0] backend_complete_offer = raw_q ? {1'b0, raw_offer && completion_enable_i[0]} : completion_valid_o & completion_enable_i;
-  wire [25:0] backend_complete_id = raw_q ? {13'd0, head_id_o} : completion_id_o;
+  wire [1:0][12:0] backend_complete_id = raw_q ? {13'd0, head_id_o} : completion_id_o;
   wire [1:0] backend_complete_solo = {1'b0, raw_q};
   wire [11:0] system_sources;
   assign read_ready = head_ready_q & {head_source_q[11:6] == system_sources[11:6], head_source_q[5:0] == system_sources[5:0]}
@@ -111,16 +111,17 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   assign illegal_accept = raw_q && illegal_offer && backend_complete_accept[0];
 
   // issue payloads and saved branch predictions
-  wire [3:0] eligible;
-  wire [127:0] issue_payload, read_data;
+  wire [1:0][1:0] eligible;
+  wire [1:0][63:0] issue_payload;
+  wire [1:0][1:0][31:0] read_data;   // [port][operand]
   // fetch-time prediction of each in-flight cfi, indexed by the rename checkpoint the cfi holds
   wire [2:0] allocate_checkpoint, issue_checkpoint, resolve_checkpoint;
   logic [31:0] prediction_pc_q [8];
   logic [7:0] prediction_taken_q;
   logic [CHECKPOINT_BITS-1:0] prediction_checkpoint_q [8];
   assign redirect_checkpoint_o = prediction_checkpoint_q[resolve_checkpoint];
-  wire [127:0] payload;
-  wire [63:0] executable_instruction;
+  wire [1:0][63:0] payload;
+  wire [1:0][31:0] executable_instruction;
   commit_event_pkg::commit_event_t [1:0] producer_event;
   wire alu1_valid, lsu_issue, lsu_complete, lsu_allocate_ready, lsu_head_memory;
   wire alu1_ready, memory_issue, memory_complete, muldiv_issue, muldiv_valid, muldiv_ready;
@@ -142,8 +143,8 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   logic [2:0] wait_checkpoint_q;
   logic [5:0] wait_destination_q [2];
   wire [1:0] stage_keep, wait_keep, issue_early;
-  wire [11:0] issue_destination;
-  wire [23:0] issue_source;
+  wire [1:0][5:0] issue_destination;
+  wire [1:0][1:0][5:0] issue_source;   // [port][operand]
   wire [31:0] early_result [2];
   // single-cycle staged results wake consumers before completion.
   wire [1:0] early_valid = stage_valid_q & stage_early_q;
@@ -154,8 +155,8 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   wire [5:0] held_destination [4];
   wire [31:0] early_data [6];
   wire [5:0] early_valid_all;
-  wire [35:0] early_destination;
-  assign held_id[0] = completion_id_o[12:0];
+  wire [5:0][5:0] early_destination;
+  assign held_id[0] = completion_id_o[0];
   assign held_id[1] = alu1_id;
   assign held_id[2] = muldiv_id;
   assign held_id[3] = lsu_complete_id;
@@ -175,17 +176,17 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   assign early_data[4] = muldiv_event.rd_value;
   assign early_data[5] = lsu_event.rd_value;
   assign early_valid_all[1:0] = early_valid;
-  assign early_destination[11:0] = {stage_destination_q[1], stage_destination_q[0]};
+  assign early_destination[1:0] = {stage_destination_q[1], stage_destination_q[0]};
   for (genvar holder = 0; holder < 4; holder++) begin : done
     // the load unit keeps its result's destination in a register
     assign held_destination[holder] = holder == 3 ? lsu_complete_destination : issued_destination_q[held_id[holder][4:0]];
     assign early_valid_all[2 + holder] = held[holder] && held_destination[holder] != 0;
-    assign early_destination[12 + holder*6 +: 6] = held_destination[holder];
+    assign early_destination[2 + holder] = held_destination[holder];
   end
 
   // launch admission and recovery membership
   logic [3:0] read_early;
-  logic [127:0] operand;
+  logic [1:0][1:0][31:0] operand;   // [port][operand]
   // registered flush, trap and recovery state block producer launches.
   wire [1:0] launch = stage_valid_q & producer_ready & execution_ready_i & {2{!(recover_hold || flush_i || fault_pending_o)}};
   for (genvar port_id = 0; port_id < 2; port_id++) begin : stage_control
@@ -195,8 +196,8 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     assign wait_keep[port_id] = wait_valid_q[port_id]
         && !(redirect_o && 5'(wait_id_q[port_id][4:0] - head_id_o[4:0]) > 5'(resolve_id_o[4:0] - head_id_o[4:0]));
     // only single-cycle work with a nonzero destination supplies staged early results.
-    assign issue_early[port_id] = issue_destination[port_id*6 +: 6] != 0 && (port_id == 0
-        || !(issue_payload[70:64] inside {7'h03, 7'h23} || (issue_payload[70:64] == 7'h33 && issue_payload[95:89] == 7'h01)));
+    assign issue_early[port_id] = issue_destination[port_id] != 0 && (port_id == 0
+        || !(issue_payload[1][6:0] inside {7'h03, 7'h23} || (issue_payload[1][6:0] == 7'h33 && issue_payload[1][31:25] == 7'h01)));
   end
   // lsu_issue/lsu_complete include memory and RV32M work that bypasses alu1 on port 1.
   assign memory_issue = EARLY_LOADS && launch[1] && stage_payload_q[1][6:0] inside {7'h03, 7'h23};
@@ -204,7 +205,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   assign lsu_issue = memory_issue || muldiv_issue;
   assign lsu_complete = memory_complete || muldiv_valid;
   assign completion_valid_o[1] = alu1_valid || lsu_complete;
-  assign completion_id_o[25:13] = memory_complete ? lsu_complete_id : muldiv_valid ? muldiv_id : alu1_id;
+  assign completion_id_o[1] = memory_complete ? lsu_complete_id : muldiv_valid ? muldiv_id : alu1_id;
   assign producer_event[1] = memory_complete ? lsu_event : muldiv_valid ? muldiv_event : alu1_event;
   assign producer_ready[1] = alu1_ready && muldiv_ready;
 
@@ -221,15 +222,15 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
       stage_valid_q <= 0;
       wait_valid_q <= 0;
     end else for (int port_id = 0; port_id < 2; port_id++) begin
-      if (issue_o[port_id]) issued_destination_q[issue_id_o[port_id*13 +: 5]] <= issue_destination[port_id*6 +: 6];
+      if (issue_o[port_id]) issued_destination_q[issue_id_o[port_id][4:0]] <= issue_destination[port_id];
       if (stage_keep[port_id]) begin
         // the stage is held: a new packet waits behind it.
         if (issue_o[port_id]) begin
           wait_valid_q[port_id] <= 1;
-          wait_id_q[port_id] <= issue_id_o[port_id*13 +: 13];
-          wait_payload_q[port_id] <= issue_payload[port_id*64 +: 64];
-          wait_data_q[port_id] <= operand[port_id*64 +: 64];
-          wait_destination_q[port_id] <= issue_destination[port_id*6 +: 6];
+          wait_id_q[port_id] <= issue_id_o[port_id];
+          wait_payload_q[port_id] <= issue_payload[port_id];
+          wait_data_q[port_id] <= operand[port_id];
+          wait_destination_q[port_id] <= issue_destination[port_id];
           wait_early_q[port_id] <= issue_early[port_id];
         end else wait_valid_q[port_id] <= wait_keep[port_id];
       end else begin
@@ -242,10 +243,10 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
           stage_destination_q[port_id] <= wait_destination_q[port_id];
           stage_early_q[port_id] <= wait_early_q[port_id];
         end else if (issue_o[port_id]) begin
-          stage_id_q[port_id] <= issue_id_o[port_id*13 +: 13];
-          stage_payload_q[port_id] <= issue_payload[port_id*64 +: 64];
-          stage_data_q[port_id] <= operand[port_id*64 +: 64];
-          stage_destination_q[port_id] <= issue_destination[port_id*6 +: 6];
+          stage_id_q[port_id] <= issue_id_o[port_id];
+          stage_payload_q[port_id] <= issue_payload[port_id];
+          stage_data_q[port_id] <= operand[port_id];
+          stage_destination_q[port_id] <= issue_destination[port_id];
           stage_early_q[port_id] <= issue_early[port_id];
         end
       end
@@ -262,8 +263,8 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     for (int port_id = 0; port_id < 2; port_id++)
       for (int source = 0; source < 2; source++)
         for (int producer = 0; producer < 6; producer++)
-          if (early_valid_all[producer] && issue_source[port_id*12 + source*6 +: 6] == early_destination[producer*6 +: 6]) begin
-            operand[port_id*64 + source*32 +: 32] = early_data[producer];
+          if (early_valid_all[producer] && issue_source[port_id][source] == early_destination[producer]) begin
+            operand[port_id][source] = early_data[producer];
             read_early[port_id*2 + source] = 1;
           end
   end
@@ -271,44 +272,44 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
       > 5'(resolve_id_o[4:0] - head_id_o[4:0]);
 
   assign selected = {valid_i[1] && !cfi[0] && !frontend_fault_i[0], valid_i[0]};
-  assign resolve_id_o = completion_id_o[12:0];
+  assign resolve_id_o = completion_id_o[0];
   assign producer_busy_o[1] = completion_valid_o[1] || stage_valid_q[1] || wait_valid_q[1];
 
   // instruction decode and dispatch
   for (genvar lane = 0; lane < 2; lane++) begin : lanes
-    assign executable_instruction[lane*32 +: 32] = frontend_fault_i[lane] ? 32'h00000013 : instruction_i[lane*32 +: 32];
-    assign payload[lane*64 +: 64] = {frontend_fault_i[lane] ? 32'd0 : pc_i[lane*32 +: 32], executable_instruction[lane*32 +: 32]};
-    decoder #(.M_EXTENSION(M_EXTENSION)) decode (.instruction_i(executable_instruction[lane*32 +: 32]), .decoded_o(decoded[lane]));
+    assign executable_instruction[lane] = frontend_fault_i[lane] ? 32'h00000013 : instruction_i[lane];
+    assign payload[lane] = {frontend_fault_i[lane] ? 32'd0 : pc_i[lane], executable_instruction[lane]};
+    decoder #(.M_EXTENSION(M_EXTENSION)) decode (.instruction_i(executable_instruction[lane]), .decoded_o(decoded[lane]));
     assign system_op[lane] = SYSTEM_SERVICE && !frontend_fault_i[lane] && (decoded[lane].op inside {OP_CSR, OP_MRET, OP_WFI}
       || (MEMORY_SERVICE && decoded[lane].op inside {OP_FENCE, OP_FENCE_I}));
     assign memory_op[lane] = MEMORY_SERVICE && !frontend_fault_i[lane] && decoded[lane].op inside {OP_LOAD, OP_STORE};
     assign cfi[lane] = decoded[lane].op inside {OP_BRANCH, OP_JAL, OP_JALR};
     assign muldiv_op[lane] = M_EXTENSION && !frontend_fault_i[lane] && decoded[lane].op == OP_MULDIV;
     assign supported_o[lane] = frontend_fault_i[lane] || ((cfi[lane] || serial_op[lane] || muldiv_op[lane] || decoded[lane].op inside {OP_ALU, OP_LUI, OP_AUIPC})
-      && pc_i[lane*32 +: 2] == 0);
-    assign rs1[lane*5 +: 5] = decoded[lane].rs1;
-    assign rs2[lane*5 +: 5] = decoded[lane].rs2;
-    assign rd[lane*5 +: 5] = decoded[lane].rd;
-    assign eligible[lane*2 +: 2] = cfi[lane] ? 2'b01 : EARLY_LOADS && memory_op[lane] || muldiv_op[lane] ? 2'b10 : 2'b11;
+      && pc_i[lane][1:0] == 0);
+    assign rs1[lane] = decoded[lane].rs1;
+    assign rs2[lane] = decoded[lane].rs2;
+    assign rd[lane] = decoded[lane].rd;
+    assign eligible[lane] = cfi[lane] ? 2'b01 : EARLY_LOADS && memory_op[lane] || muldiv_op[lane] ? 2'b10 : 2'b11;
   end
 
   // Per-slot tables retain frontend faults and each branch's fetch-time prediction.
   always_ff @(posedge clk_i) begin
     for (int lane = 0; lane < 2; lane++) begin
-      automatic logic [4:0] slot = allocate_id_o[lane*13 +: 5];
+      automatic logic [4:0] slot = allocate_id_o[lane][4:0];
       if (allocate_accept_o[lane]) begin
         fault_q[slot] <= frontend_fault_i[lane];
         if (frontend_fault_i[lane]) begin
           if (TRACE) begin
-            fault_instruction_q[slot] <= instruction_i[lane*32 +: 32];
-            fault_pc_q[slot] <= pc_i[lane*32 +: 32];
+            fault_instruction_q[slot] <= instruction_i[lane];
+            fault_pc_q[slot] <= pc_i[lane];
           end
-          fault_cause_q[slot] <= frontend_cause_i[lane*32 +: 4];
-          fault_value_q[slot] <= frontend_value_i[lane*32 +: 32];
+          fault_cause_q[slot] <= frontend_cause_i[lane][3:0];
+          fault_value_q[slot] <= frontend_value_i[lane];
         end
       end
       if (allocate_accept_o[lane] && cfi[lane]) begin
-        prediction_pc_q[allocate_checkpoint] <= predicted_pc_i[lane*32 +: 32];
+        prediction_pc_q[allocate_checkpoint] <= predicted_pc_i[lane];
         prediction_taken_q[allocate_checkpoint] <= predicted_taken_i[lane];
         prediction_checkpoint_q[allocate_checkpoint] <= predicted_checkpoint_i[lane*CHECKPOINT_BITS +: CHECKPOINT_BITS];
       end
@@ -319,7 +320,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
   always_comb begin
     completion_event_o = producer_event;
     for (int lane = 0; lane < 2; lane++) begin
-      automatic logic [4:0] slot = completion_id_o[lane*13 +: 5];
+      automatic logic [4:0] slot = completion_id_o[lane][4:0];
       if (fault_q[slot]) begin
         completion_event_o[lane] = '0;
         completion_event_o[lane].valid = 1;
@@ -342,7 +343,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     .id_i(stage_id_q[0]), .instruction_i(stage_payload_q[0][31:0]), .pc_i(stage_payload_q[0][63:32]),
     .source1_i(stage_data_q[0][31:0]), .source2_i(stage_data_q[0][63:32]),
     .predicted_taken_i(prediction_taken_q[stage_checkpoint_q]), .predicted_pc_i(prediction_pc_q[stage_checkpoint_q]),
-    .valid_o(completion_valid_o[0]), .id_o(completion_id_o[12:0]), .event_o(producer_event[0]), .result_o(early_result[0]),
+    .valid_o(completion_valid_o[0]), .id_o(completion_id_o[0]), .event_o(producer_event[0]), .result_o(early_result[0]),
     .held_o(held0), .recover_pending_o(recover_pending),
     .take_i(completion_accept_o[0]), .resolve_valid_o, .taken_o(resolve_taken_o),
     .mispredict_o(resolve_mispredict_o), .next_pc_o(resolve_pc_o), .resolve_take_i(resolve_accept_o)
@@ -412,9 +413,9 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
       .clk_i, .rst_i, .flush_i(flush_i || trap_accept_o || cancel_system_i), .drained_i,
       .hold_i(flush_i || fault_pending_o || cancel_system_i || recover_hold),
       .valid_i(selected), .serial_i(serial_op), .cfi0_i(cfi[0]), .memory_i(memory_op[0]),
-      .instruction_i(instruction_i[31:0]), .pc_i(pc_i[31:0]),
+      .instruction_i(instruction_i[0]), .pc_i(pc_i[0]),
       .dispatch_valid_o(admitted), .dispatch_solo_o(dispatch_solo),
-      .allocate_accept_i(allocate_accept_o), .allocate_id_i(allocate_id_o[12:0]), .source1_i(rename_source[5:0]), .source2_i(rename_source2),
+      .allocate_accept_i(allocate_accept_o), .allocate_id_i(allocate_id_o[0]), .source1_i(rename_source[5:0]), .source2_i(rename_source2),
       .queue_dispatch_o(), .head_valid_i(head_valid), .head_id_i(head_id_o), .head_pc_i(head_pc),
       .recover_i(redirect_o), .recover_slot_i(resolve_id_o[4:0]),
       .retire_accept_i(serial_accept && !(EARLY_LOADS && memory_serial_offer)), .retire_id_i(serial_id),
@@ -494,7 +495,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
           .allocate_valid_i(admitted), .allocate_memory_i(memory_op),
           .allocate_store_i({decoded[1].op == OP_STORE, decoded[0].op == OP_STORE}),
           .allocate_ready_o(lsu_allocate_ready), .allocate_i(allocate_accept_o), .allocate_id_i(allocate_id_o),
-          .allocate_instruction_i(instruction_i[31:0]), .allocate_pc_i(pc_i[31:0]),
+          .allocate_instruction_i(instruction_i[0]), .allocate_pc_i(pc_i[0]),
           .allocate_sources_i({rename_source2, rename_source[5:0]}),
           .issue_i(memory_issue), .issue_id_i(stage_id_q[1]), .issue_destination_i(stage_destination_q[1]),
           .issue_instruction_i(stage_payload_q[1][31:0]),
@@ -634,7 +635,7 @@ module execution_backend #(parameter bit SYSTEM_SERVICE = 0, parameter bit MEMOR
     if (!rst_i) begin
       assert (valid_i != 2'b10) else $fatal(1, "CF_BACKEND_PREFIX");
       for (int lane = 0; lane < 2; lane++)
-        assert (!(allocate_accept_o[lane] && frontend_fault_i[lane]) || frontend_cause_i[lane*32 +: 32] < 16)
+        assert (!(allocate_accept_o[lane] && frontend_fault_i[lane]) || frontend_cause_i[lane] < 16)
           else $fatal(1, "CF_FAULT_CAUSE");
       assert (!drained_i || producer_busy_o == 0) else $fatal(1, "CF_BACKEND_DRAIN");
       assert (!resolve_accept_o || (resolve_valid_o && resolve_grant_i)) else $fatal(1, "CF_BACKEND_RESOLVE");

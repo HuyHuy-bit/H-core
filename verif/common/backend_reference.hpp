@@ -134,7 +134,7 @@ public:
         const unsigned cp = checkpoints(); unsigned released = 0;
         for (auto b : branches)
             if ((resolve && !mispredict && b.id == resolve_id) || (recovery && (b.id == resolve_id || locate(b.id) > ri))) released |= 1U << b.slot;
-        auto speculative = map(); auto available = free(); auto readiness = ready();
+        auto speculative = map(); auto available = free();
         const auto& sc=in.serial;
         const bool serial_qualified=active && !recover_hold && !in.drain && !queue.empty()
             && queue.front().solo && !queue.front().done && !queue.front().cfi && sc.id==queue.front().id
@@ -156,12 +156,12 @@ public:
                 && !(lane && in.complete[0].offer && c.id == in.complete[0].id)) {
                 complete |= 1U << lane;
                 if (queue[i].rd && !bit(c.event, TRAP_OFFSET)) {
-                    wb |= 1U << lane; readiness |= UINT64_C(1) << queue[i].destination;
+                    wb |= 1U << lane;
                 }
             }
         }
         const bool serial_write = serial && (retire&1) && queue.front().rd;
-        if (serial_write) { wb |= 1; readiness |= UINT64_C(1)<<queue.front().destination; }
+        if (serial_write) wb |= 1;
         auto wb_index=[&](unsigned lane) { return lane == 0 && serial_write ? 0 : locate(in.complete[lane].id); };
         auto wb_event=[&](unsigned lane) -> const Event& { return lane == 0 && serial_write ? sc.event : in.complete[lane].event; };
         unsigned count = in.count; if ((in.cfi&1) && count) count = 1;
@@ -248,13 +248,12 @@ public:
         }
         if (tv) equal_event(dut.trap_event_o,0,queue.front().event,true);
         for (unsigned port = 0; port < 4; ++port) {
-            unsigned p = in.read[port]; uint32_t value = payload[p]; bool defined = known[p];
-            for (unsigned lane = 0; lane < 2; ++lane) if ((wb & (1U << lane)) && queue[wb_index(lane)].destination == p) {
-                value = get(wb_event(lane),RD_VALUE_OFFSET,32); defined = true; ++coverage["prf_bypass"];
-            }
-            if (defined) require(get(dut.read_data_o,port*32,32) == value, "PRF payload");
+            const unsigned p = in.read[port];
+            for (unsigned lane = 0; lane < 2; ++lane)
+                coverage["read_during_write"] += (wb & (1U << lane)) && queue[wb_index(lane)].destination == p;
+            if (known[p]) require(get(dut.read_data_o,port*32,32) == payload[p], "PRF payload");
             coverage["read_reclaim"] += ((reclaim & ready()) >> p)&1;
-            const bool read_ready = active && !trap && ((readiness & ~reclaim) >> p & 1);
+            const bool read_ready = active && !trap && ((ready() & ~reclaim) >> p & 1);
             require(((dut.read_ready_o >> port)&1) == read_ready,"PRF readiness");
         }
 

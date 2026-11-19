@@ -424,7 +424,7 @@ def main():
         ('early_ignores_overlap','rtl/memory/load_store_unit.sv','start_ready && forward_mask == 0;','start_ready;'),
         ('early_kills_survivor','rtl/memory/load_store_unit.sv',"(recover_i && 5'(slot - head) > 5'(recover_slot_i - head))",'recover_i'),
         # A load in the execute stage must not wake its consumers at issue: its result comes from memory.
-        ('early_wakes_on_load','rtl/backend/execution_backend.sv','|| !(issue_payload[70:64] inside',"|| 1'b1 || !(issue_payload[70:64] inside"),
+        ('early_wakes_on_load','rtl/backend/execution_backend.sv','|| !(issue_payload[1][6:0] inside',"|| 1'b1 || !(issue_payload[1][6:0] inside"),
     ] if 'rtl/memory/load_store_unit.sv' in config['sources'] else []) + ([
         # Fence.i: without the cache clean, fetch reads stale code.
         ('fence_i_skips_clean','rtl/system/head_system_controller.sv','clean_q <= CLEAN_PULSE;','clean_q <= CLEAN_DONE;'),

@@ -30,30 +30,25 @@ module load_store_prepare (
   descriptor_t built, saved_q, visible;
   decoded_t decoded;
   logic pending_q;
-  wire [31:0] base = decoded.rs1 == 0 ? 32'd0 : source1_i;
+  wire unused_decode = ^decoded;
+
+  decoder decode (.instruction_i, .decoded_o(decoded));
+
+  // Raw I/S fields let address generation run alongside decode.
+  wire [31:0] base = instruction_i[19:15] == 0 ? 32'd0 : source1_i;
+  wire [31:0] immediate = {{20{instruction_i[31]}}, instruction_i[31:25],
+                           instruction_i[5] ? instruction_i[11:7] : instruction_i[24:20]};
+  wire [31:0] address;
+  prefix_add32 address_add (.a_i(base), .b_i(immediate), .sum_o(address));
+
+  wire store = decoded.op == OP_STORE;
   wire [31:0] data = decoded.rs2 == 0 ? 32'd0 : source2_i;
-  wire [31:0] address, cause, trap_value;
-  wire fault;
-  wire [64:0] unused_execute;
+  wire misaligned = (decoded.funct3[1:0] == 1 && address[0])
+      || (decoded.funct3[1:0] == 2 && address[1:0] != 0);
+  wire fault = misaligned || !accessible(address, store);
   wire idempotent = (in_region(address, BRAM_BASE, BRAM_SIZE) && BRAM_IDEMPOTENT)
     || (in_region(address, UART_BASE, UART_SIZE) && UART_IDEMPOTENT)
     || (in_region(address, GPIO_BASE, GPIO_SIZE) && GPIO_IDEMPOTENT);
-
-  assign valid_o = pending_q && !rst_i && !flush_i;
-  assign ready_o = !rst_i && !flush_i && (!pending_q || take_i);
-  assign visible = valid_o ? saved_q : '0;
-  assign {id_o, instruction_o, pc_o, source1_o, source2_o, address_o,
-    write_data_o, cause_o, trap_value_o, byte_mask_o, size_o,
-    store_o, load_unsigned_o, uncached_o, head_only_o, fault_o} = visible;
-
-  // instruction decode and effective address
-  decoder decode (.instruction_i, .decoded_o(decoded));
-  execute_unit execute (
-    .decoded_i(decoded), .pc_i, .instruction_i, .source1_i(base), .source2_i(data),
-    .csr_value_i(32'd0), .mepc_i(32'd0), .csr_legal_i(1'b0),
-    .result_o(unused_execute[31:0]), .next_pc_o(unused_execute[63:32]), .address_o(address),
-    .trap_o(fault), .cause_o(cause), .trap_value_o(trap_value), .taken_o(unused_execute[64])
-  );
 
   // access classification and byte lanes
   always_comb begin
@@ -64,12 +59,16 @@ module load_store_prepare (
     built.source1 = base;
     built.source2 = data;
     built.address = address;
-    built.store = decoded.op == OP_STORE;
+    built.store = store;
     built.size = decoded.funct3[1:0];
     built.load_unsigned = decoded.op == OP_LOAD && decoded.funct3[2];
     built.fault = fault;
-    built.cause = cause;
-    built.trap_value = trap_value;
+    if (fault) begin
+      built.cause = misaligned
+          ? (store ? CAUSE_STORE_ADDRESS_MISALIGNED : CAUSE_LOAD_ADDRESS_MISALIGNED)
+          : (store ? CAUSE_STORE_ACCESS_FAULT : CAUSE_LOAD_ACCESS_FAULT);
+      built.trap_value = address;
+    end
     built.head_only = fault || built.store || !cached(address) || !idempotent;
     if (!fault) begin
       built.uncached = !cached(address);
@@ -93,6 +92,13 @@ module load_store_prepare (
       end
     end
   end
+
+  assign valid_o = pending_q && !rst_i && !flush_i;
+  assign ready_o = !rst_i && !flush_i && (!pending_q || take_i);
+  assign visible = valid_o ? saved_q : '0;
+  assign {id_o, instruction_o, pc_o, source1_o, source2_o, address_o,
+    write_data_o, cause_o, trap_value_o, byte_mask_o, size_o,
+    store_o, load_unsigned_o, uncached_o, head_only_o, fault_o} = visible;
 
   // assertions
 `ifndef SYNTHESIS

@@ -6,30 +6,30 @@ module issue_queue (
   input  wire hold_i,            // no dispatch or issue: covers every flush and recovery cycle, from registered state
   input  wire [4:0] head_slot_i, recover_slot_i,
   input  wire [1:0] dispatch_i,
-  input  wire [25:0] dispatch_id_i,
-  input  wire [23:0] dispatch_source_i,
-  input  wire [3:0] dispatch_ready_i, dispatch_eligible_i,
-  input  wire [11:0] dispatch_destination_i,
-  input  wire [127:0] dispatch_payload_i,
+  input  wire [1:0][12:0] dispatch_id_i,
+  input  wire [1:0][1:0][5:0] dispatch_source_i,   // [lane][operand]
+  input  wire [1:0][1:0] dispatch_ready_i, dispatch_eligible_i,
+  input  wire [1:0][5:0] dispatch_destination_i,
+  input  wire [1:0][63:0] dispatch_payload_i,
   input  wire [1:0] wb_accept_i,
-  input  wire [11:0] wb_destination_i,
+  input  wire [1:0][5:0] wb_destination_i,
   input  wire [1:0] port_ready_i,
   // early results are already in stage or producer registers when their consumers issue.
   input  wire [5:0] early_valid_i,
-  input  wire [35:0] early_destination_i,
+  input  wire [5:0][5:0] early_destination_i,
 
   output logic [1:0] dispatch_ready_o,
   output logic [1:0] issue_o,
-  output logic [25:0] issue_id_o,
-  output logic [23:0] read_address_o,
-  output logic [11:0] issue_destination_o,
-  output logic [127:0] issue_payload_o,
+  output logic [1:0][12:0] issue_id_o,
+  output logic [1:0][1:0][5:0] read_address_o,   // [port][operand]
+  output logic [1:0][5:0] issue_destination_o,
+  output logic [1:0][63:0] issue_payload_o,
   output logic [4:0] occupancy_o
 );
 
   logic [15:0] valid_q;
   logic [12:0] id_q [16];
-  logic [11:0] source_q [16];
+  logic [1:0][5:0] source_q [16];
   logic [1:0] ready_q [16], eligible_q [16];
   logic [5:0] destination_q [16];
   logic [63:0] payload_q [16];
@@ -67,12 +67,12 @@ module issue_queue (
       early[slot] = 0;
       for (int operand = 0; operand < 2; operand++) begin
         for (int port_id = 0; port_id < 6; port_id++)
-          if (early_valid_i[port_id] && early_destination_i[port_id*6 +: 6] == source_q[slot][operand*6 +: 6])
+          if (early_valid_i[port_id] && early_destination_i[port_id] == source_q[slot][operand])
             early[slot][operand] = 1;
-        awake[slot][operand] = awake[slot][operand] || source_q[slot][operand*6 +: 6] == 0;
+        awake[slot][operand] = awake[slot][operand] || source_q[slot][operand] == 0;
         for (int lane = 0; lane < 2; lane++)
-          if (wb_accept_i[lane] && wb_destination_i[lane*6 +: 6] != 0
-              && wb_destination_i[lane*6 +: 6] == source_q[slot][operand*6 +: 6])
+          if (wb_accept_i[lane] && wb_destination_i[lane] != 0
+              && wb_destination_i[lane] == source_q[slot][operand])
             awake[slot][operand] = 1;
       end
     end
@@ -123,10 +123,10 @@ module issue_queue (
       chosen[port_id] = !stop && port_ready_i[port_id] ? (port_id == 0 ? first0 : select1) : 16'd0;
       issue_o[port_id] = |chosen[port_id];
       for (int slot = 0; slot < 16; slot++) begin
-        issue_id_o[port_id*13 +: 13] |= {13{chosen[port_id][slot]}} & id_q[slot];
-        read_address_o[port_id*12 +: 12] |= {12{chosen[port_id][slot]}} & source_q[slot];
-        issue_destination_o[port_id*6 +: 6] |= {6{chosen[port_id][slot]}} & destination_q[slot];
-        issue_payload_o[port_id*64 +: 64] |= {64{chosen[port_id][slot]}} & payload_q[slot];
+        issue_id_o[port_id] |= {13{chosen[port_id][slot]}} & id_q[slot];
+        read_address_o[port_id] |= {12{chosen[port_id][slot]}} & source_q[slot];
+        issue_destination_o[port_id] |= {6{chosen[port_id][slot]}} & destination_q[slot];
+        issue_payload_o[port_id] |= {64{chosen[port_id][slot]}} & payload_q[slot];
       end
     end
   end
@@ -144,12 +144,12 @@ module issue_queue (
       for (int lane = 0; lane < 2; lane++) begin
         if (!stop && dispatch_i[lane]) begin
           valid_q[free_slot[lane]] <= 1;
-          id_q[free_slot[lane]] <= dispatch_id_i[lane*13 +: 13];
-          source_q[free_slot[lane]] <= dispatch_source_i[lane*12 +: 12];
-          ready_q[free_slot[lane]] <= dispatch_ready_i[lane*2 +: 2];
-          eligible_q[free_slot[lane]] <= dispatch_eligible_i[lane*2 +: 2];
-          destination_q[free_slot[lane]] <= dispatch_destination_i[lane*6 +: 6];
-          payload_q[free_slot[lane]] <= dispatch_payload_i[lane*64 +: 64];
+          id_q[free_slot[lane]] <= dispatch_id_i[lane];
+          source_q[free_slot[lane]] <= dispatch_source_i[lane];
+          ready_q[free_slot[lane]] <= dispatch_ready_i[lane];
+          eligible_q[free_slot[lane]] <= dispatch_eligible_i[lane];
+          destination_q[free_slot[lane]] <= dispatch_destination_i[lane];
+          payload_q[free_slot[lane]] <= dispatch_payload_i[lane];
         end
       end
     end
@@ -163,13 +163,13 @@ module issue_queue (
       assert (dispatch_i != 2'b10 && (dispatch_i & ~dispatch_ready_o) == 0) else $fatal(1, "IQ_DISPATCH");
       for (int lane = 0; lane < 2; lane++) begin
         if (dispatch_i[lane]) begin
-          assert (dispatch_eligible_i[lane*2 +: 2] != 0) else $fatal(1, "IQ_ELIGIBILITY");
+          assert (dispatch_eligible_i[lane] != 0) else $fatal(1, "IQ_ELIGIBILITY");
           for (int slot = 0; slot < 16; slot++)
-            assert (!valid_q[slot] || id_q[slot][4:0] != dispatch_id_i[lane*13 +: 5])
+            assert (!valid_q[slot] || id_q[slot][4:0] != dispatch_id_i[lane][4:0])
               else $fatal(1, "IQ_IDENTITY");
         end
       end
-      assert (dispatch_i != 2'b11 || dispatch_id_i[4:0] != dispatch_id_i[17:13])
+      assert (dispatch_i != 2'b11 || dispatch_id_i[0][4:0] != dispatch_id_i[1][4:0])
         else $fatal(1, "IQ_IDENTITY");
       assert ((chosen[0] & chosen[1]) == 0) else $fatal(1, "IQ_DUPLICATE_ISSUE");
     end

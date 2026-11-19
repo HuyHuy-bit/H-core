@@ -132,13 +132,11 @@ struct Bench {
         unsigned retired=rv&in.retire; if (!(retired&1)) retired=0;
         std::array<Event,2> completed{};
         unsigned ca=0,wb=serial_accept && saved.rd ? 1:0;
-        auto live_ready=ready();
-        if (wb) live_ready|=uint64_t(1)<<saved.tag;
         for (unsigned n=0;n<2;n++) if (in.complete[n]>=0) {
             const auto& e=queue.at(unsigned(in.complete[n])); completed[n]=event(e,in.data[n],in.raw_fault);
             if (active && !illegal && !fault && !e.done && (!hold || in.complete[n]==0)) {
                 ca|=1u<<n;
-                if (e.rd && !in.raw_fault) { wb|=1u<<n; live_ready|=uint64_t(1)<<e.tag; }
+                if (e.rd && !in.raw_fault) wb|=1u<<n;
             }
         }
         auto rat=map(); auto avail=free(); std::array<Entry,2> allocated{};
@@ -194,11 +192,10 @@ struct Bench {
         compare(d.illegal_event_o,0,illegal_event,"illegal event");compare(d.trap_event_o,0,trap_event,"trap event");
         for (unsigned n=0;n<2;n++) if ((rv>>n)&1) {auto e=serial_ready?serial_event:queue[n].event;put(e,ORDER_OFFSET,64,order+n);compare(d.retire_event_o,n,e,"retire event");}
         for (unsigned port=0;port<4;port++) {
-            unsigned p=port?audit:source; uint32_t value=payload[p];bool defined=known[p];
-            if (serial_accept && saved.rd && p==saved.tag) {value=held.value;defined=true;coverage["serial_bypass"]++;}
-            for (unsigned n=0;n<2;n++) if ((ca>>n)&1) {const auto& e=queue.at(unsigned(in.complete[n]));if (e.rd && !in.raw_fault && e.tag==p) {value=in.data[n];defined=true;}}
-            if (defined) require(get(d.read_data_o,port*32,32)==value,"PRF data");
-            bool r=active && !trap_accept && ((live_ready>>p)&1);
+            const unsigned p = port ? audit : source;
+            if (serial_accept && saved.rd && p==saved.tag) coverage["serial_read_during_write"]++;
+            if (known[p]) require(get(d.read_data_o,port*32,32)==payload[p],"PRF data");
+            bool r=active && !trap_accept && ((ready()>>p)&1);
             if (recovery) for (unsigned n=1;n<queue.size();n++) if (queue[n].rd && queue[n].tag==p) r=false;
             require(bool((d.read_ready_o>>port)&1)==r,"PRF ready");
         }

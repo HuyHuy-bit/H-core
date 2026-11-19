@@ -76,14 +76,11 @@ module rename_rob #(parameter bit TRACE = 1) (
     assign completion_take[lane] = complete_offer_i[lane] && rob_complete_ready[lane];
   end
 
-  // operand readiness and bypass
+  // Issue and head ports use registered PRF readiness.
   always_comb begin
     for (int port_id = 0; port_id < 4; port_id++) begin
       read_ready_o[port_id] = ready_o[read_address_i[port_id*6 +: 6]]
         && !reclaim[read_address_i[port_id*6 +: 6]];
-      for (int lane = 0; lane < 2; lane++)
-        if (wb_accept_o[lane] && wb_destination_o[lane*6 +: 6] == read_address_i[port_id*6 +: 6])
-          read_ready_o[port_id] = 1;
       if (rst_i || recover) read_ready_o[port_id] = 0;
     end
     for (int port_id = 0; port_id < 2; port_id++) begin
@@ -140,7 +137,7 @@ module rename_rob #(parameter bit TRACE = 1) (
   );
 
   // physical register file
-  prf_4r2w #(.READS(6), .BYPASS_READS(4)) registers (
+  prf_4r2w #(.READS(6), .BYPASS_READS(0)) registers (
     .clk_i, .rst_i, .raddr_i({head_address_i, read_address_i}), .rdata_o({head_data_o, read_data_o}),
     .wb_accept_i(wb_accept_o), .waddr_i(wb_destination_o), .wdata_i(wb_data_o)
   );

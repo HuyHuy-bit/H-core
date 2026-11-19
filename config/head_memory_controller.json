@@ -6,7 +6,7 @@
     "rtl/generated/platform_pkg.sv",
     "rtl/core/core_pkg.sv",
     "rtl/frontend/decoder.sv",
-    "rtl/execute/execute_unit.sv",
+    "rtl/core/prefix_add32.sv",
     "rtl/memory/load_store_prepare.sv",
     "rtl/generated/memory_protocol_pkg.sv",
     "rtl/memory/load_transaction.sv",

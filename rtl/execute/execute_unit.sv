@@ -1,5 +1,5 @@
 `default_nettype none
-// combinational rv32i execute: alu result, next pc, branch direction, memory address and trap cause.
+// RV32I arithmetic, control flow and system traps.
 module execute_unit (
   input  core_pkg::decoded_t decoded_i,
   input  wire [31:0] pc_i, instruction_i, source1_i, source2_i, csr_value_i, mepc_i,
@@ -56,18 +56,6 @@ module execute_unit (
           default: taken_o = 0;
         endcase
         if (taken_o) next_pc_o = pc_i + decoded_i.immediate;
-      end
-
-      // memory access checks
-      OP_LOAD, OP_STORE: begin
-        if ((decoded_i.funct3[1:0] == 1 && address_o[0]) || (decoded_i.funct3[1:0] == 2 && address_o[1:0] != 0)) begin
-          trap_o = 1;
-          cause_o = decoded_i.op == OP_STORE ? CAUSE_STORE_ADDRESS_MISALIGNED : CAUSE_LOAD_ADDRESS_MISALIGNED;
-        end else if (!accessible(address_o, decoded_i.op == OP_STORE)) begin
-          trap_o = 1;
-          cause_o = decoded_i.op == OP_STORE ? CAUSE_STORE_ACCESS_FAULT : CAUSE_LOAD_ACCESS_FAULT;
-        end
-        if (trap_o) trap_value_o = address_o;
       end
 
       // csr and environment operations
